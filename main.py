@@ -91,6 +91,29 @@ threading.Thread(target=initOcrReader, daemon=True).start()
 
 # ---------- vision ----------
 
+def ocrRegion(region, debug=False):
+    while reader is None:
+        time.sleep(0.05)
+    frame = getLatestFrame()
+    if frame is None:
+        return ''
+    l, t, r, b = region
+    cropped = frame[t:b, l:r]
+    if region == coords["error"]:
+        hsv = cv.cvtColor(cropped, cv.COLOR_BGR2HSV)
+        mask1 = cv.inRange(hsv, lowerRed1, upperRed1)
+        mask2 = cv.inRange(hsv, lowerRed2, upperRed2)
+        redMask = cv.bitwise_or(mask1, mask2)
+        processed = np.full(cropped.shape, 255, dtype=np.uint8)
+        processed[redMask > 0] = [0, 0, 0]
+    else:
+        processed = cropped
+    if debug:
+        cv.imwrite(os.path.join('debug', f'ocr_{time.strftime("%Y%m%d_%H%M%S")}.png'), processed)
+    upscaled = cv.resize(processed, None, fx=4, fy=4, interpolation=cv.INTER_CUBIC)
+    results = reader.readtext(upscaled)
+    return ''.join([res[1] for res in results]).strip()
+
 def findBoxes(imgPath, threshold=0.70, debug=False):
     frame = getLatestFrame()
     if frame is None:
@@ -178,3 +201,22 @@ def clickBoxes(boxes, delay=SLEEP_VERY_SHORT):
     moveAndClick(x, y)
     randomSleep(*delay)
     return True
+
+def checkStats():
+    elixirTxt = ocrRegion(coords["elixir"])
+    goldTxt = ocrRegion(coords["gold"])
+    trophyTxt = ocrRegion(coords["trophies"])
+    try:
+        elixirNum = int(re.sub(r'\D+', '', elixirTxt))
+    except:
+        elixirNum = 0
+    try:
+        goldNum = int(re.sub(r'\D+', '', goldTxt))
+    except:
+        goldNum = 0
+    try:
+        trophyNum = int(re.sub(r'\D+', '', trophyTxt))
+    except:
+        trophyNum = 0
+    print(f"[Stats] Elixir: {elixirNum}, Gold: {goldNum}, Trophies: {trophyNum}")
+    return elixirNum, goldNum, trophyNum
