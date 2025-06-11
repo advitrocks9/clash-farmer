@@ -220,3 +220,72 @@ def checkStats():
         trophyNum = 0
     print(f"[Stats] Elixir: {elixirNum}, Gold: {goldNum}, Trophies: {trophyNum}")
     return elixirNum, goldNum, trophyNum
+
+# ---------- attack ----------
+
+def findMatch():
+    click(region=coords["attack"], delay=SLEEP_SHORT)
+    click(region=coords["find_match"], delay=SLEEP_VERY_SHORT)
+
+def attackOngoing():
+    global attackStateLast
+    txt = ocrRegion(coords["start_end"]).lower()
+    ongoing = "start" not in txt
+    if attackStateLast is None or ongoing != attackStateLast:
+        attackStateLast = ongoing
+    return ongoing
+
+def attackEnd(goHome=False):
+    boxes = findBoxes("images/return_home.png")
+    ended = len(boxes) > 0
+    if ended and goHome:
+        clickBoxes(boxes)
+    return ended
+
+def useUltimate():
+    boxes = findBoxes("images/ultimate.png")
+    if len(boxes) != 0:
+        randomSleep(*SLEEP_LONG)
+        mouse.click_human_like(MouseButton.MIDDLE)
+
+def deployHero(button=MouseButton.LEFT):
+    def heroDeployed():
+        return any(w in ocrRegion(coords["error"]).lower() for w in ("select", "different", "unit"))
+    mouse.click_human_like(MouseButton.MIDDLE)
+    while not heroDeployed():
+        x, y = randomPointInRegion(coords["troop_deploy"], (coords["enemy_base"], coords["boosts"]))
+        moveAndClick(x, y)
+        randomSleep(*SLEEP_VERY_SHORT)
+        mouse.click_human_like(button)
+
+def deployTroops(phase, button=MouseButton.LEFT):
+    def allDeployed():
+        return any(w in ocrRegion(coords["error"]).lower() for w in ("all", "forces", "deployed"))
+    if phase == 1:
+        mouse.click_human_like(MouseButton.MOUSE4)
+    elif phase == 2:
+        mouse.click_human_like(MouseButton.MOUSE5)
+    while not allDeployed():
+        x, y = randomPointInRegion(coords["troop_deploy"], (coords["enemy_base"], coords["boosts"]))
+        moveAndClick(x, y)
+        randomSleep(*SLEEP_VERY_SHORT)
+        mouse.click_human_like(button)
+
+def handleBattle():
+    randomSleep(*SLEEP_LONG)
+    randomSleep(*SLEEP_SHORT)
+    roundPhase = 1
+    matchStart = time.time()
+    while not attackEnd():
+        mouse.smooth_scroll(-30)
+        if not attackOngoing():
+            deployHero()
+            deployTroops(roundPhase)
+        while attackOngoing() and not attackEnd():
+            useUltimate()
+            randomSleep(*SLEEP_VERY_SHORT)
+        if roundPhase == 1 and time.time() - matchStart > 60:
+            roundPhase = 2
+        randomSleep(*SLEEP_VERY_SHORT)
+    attackEnd(goHome=True)
+    randomSleep(*SLEEP_MEDIUM)
