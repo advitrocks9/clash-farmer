@@ -202,6 +202,41 @@ def clickBoxes(boxes, delay=SLEEP_VERY_SHORT):
     randomSleep(*delay)
     return True
 
+def atBuilderBase():
+    return len(findBoxes('images/home_builder.png')) == 0
+
+def switchBases():
+    if not atBuilderBase():
+        mouse.pan(-300, 200, MouseButton.LEFT)
+        randomSleep(*SLEEP_SHORT)
+        click(templatePath="images/ship.png", delay=SLEEP_VERY_SHORT)
+        randomSleep(*SLEEP_MEDIUM)
+
+def collectAll():
+    mouse.smooth_scroll(-30)
+    randomSleep(*SLEEP_SHORT)
+    builderMode = atBuilderBase()
+    if builderMode:
+        mouse.pan(200, -200, MouseButton.LEFT)
+        randomSleep(*SLEEP_SHORT)
+    for resourceName, resourcePath in resources.items():
+        if builderMode != resourceName.startswith("builder_"):
+            continue
+        while True:
+            boxes = findBoxes(resourcePath)
+            if len(boxes) == 0:
+                break
+            clickBoxes(boxes)
+            randomSleep(*SLEEP_MEDIUM)
+            if builderMode and len(findBoxes("images/collect.png")) > 0:
+                click(templatePath="images/collect.png", delay=SLEEP_VERY_SHORT)
+                randomSleep(*SLEEP_VERY_SHORT)
+                click(templatePath="images/exit.png", delay=SLEEP_VERY_SHORT)
+                randomSleep(*SLEEP_SHORT)
+                break
+            click(templatePath="images/exit.png", delay=SLEEP_VERY_SHORT)
+            randomSleep(*SLEEP_SHORT)
+
 def checkStats():
     elixirTxt = ocrRegion(coords["elixir"])
     goldTxt = ocrRegion(coords["gold"])
