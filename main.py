@@ -324,3 +324,49 @@ def handleBattle():
         randomSleep(*SLEEP_VERY_SHORT)
     attackEnd(goHome=True)
     randomSleep(*SLEEP_MEDIUM)
+
+# ---------- main ----------
+
+def main():
+    global mouse, statsPrev, totalElixirGain, totalGoldGain, attackCount
+    mouse = createController()
+    threading.Thread(target=captureLoop, daemon=True).start()
+    os.startfile(r"C:\Users\advit\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Google Play Games\Clash of Clans.lnk")
+    os.startfile(r"C:\Users\advit\PycharmProjects\cocbot\rebind.ahk")
+    while len(findBoxes("images/coc.png")) == 0:
+        time.sleep(1)
+    clickBoxes(findBoxes("images/fullscreen.png"))
+    while len(findBoxes("images/army.png")) == 0:
+        time.sleep(1)
+    time.sleep(5)
+    while True:
+        collectAll()
+        if atBuilderBase():
+            elixirRaw, goldRaw, _ = checkStats()
+            elixir = elixirRaw if elixirRaw > 0 else (statsPrev[0] if statsPrev else 0)
+            gold = goldRaw if goldRaw > 0 else (statsPrev[1] if statsPrev else 0)
+            validElixir = 0 < elixir < 6000000
+            validGold = 0 < gold < 6000000
+            if (validElixir and elixir > 5500000) or (validGold and gold > 5500000):
+                break
+            statsPrev = (elixir, gold)
+            findMatch()
+            handleBattle()
+            collectAll()
+            newElixir, newGold, _ = checkStats()
+            gainElixir = 0
+            gainGold = 0
+            if statsPrev and 0 < newElixir < 6000000 and 0 < statsPrev[0] < 6000000:
+                gainElixir = max(0, newElixir - statsPrev[0])
+            if statsPrev and 0 < newGold < 6000000 and 0 < statsPrev[1] < 6000000:
+                gainGold = max(0, newGold - statsPrev[1])
+            attackCount += 1
+            totalElixirGain += gainElixir
+            totalGoldGain += gainGold
+            avgElixir = totalElixirGain // attackCount
+            avgGold = totalGoldGain // attackCount
+        else:
+            switchBases()
+
+if __name__ == "__main__":
+    main()
