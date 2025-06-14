@@ -1,0 +1,6 @@
+numpy
+opencv-python
+easyocr
+mss
+pyserial
+pywin32
