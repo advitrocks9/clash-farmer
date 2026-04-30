@@ -380,11 +380,20 @@ def main() -> None:
                 state_detector.reset()
                 continue
             # Recovery ladder for unknown screens:
-            # 1st: tap chest/center to advance reward animations
-            # 2nd: tap red close-X if a modal
-            # 3rd: BACK as last resort before CoC restart
-            if consecutive_unknown == 1:
-                log.info("UNKNOWN x1 — tap (640, 400) to advance reward / dismiss overlay")
+            # 1st: any "Return Home" button on screen (defense replay,
+            #      visit-village, post-attack result that fell outside the
+            #      RESULT ROI). Catch this before reward-tap to avoid
+            #      accidentally tapping an offer card.
+            # 2nd: tap chest/item center to advance reward animations.
+            # 3rd: red close-X for any modal.
+            # 4th: BACK as last resort before CoC restart.
+            ret = template_set.get("btn_return_home")
+            ret_pos = tmpl.find(frame, ret, threshold=0.6) if ret is not None else None
+            if consecutive_unknown == 1 and ret_pos is not None:
+                log.info(f"UNKNOWN x1 — tap Return Home at {ret_pos}")
+                adb.tap(ret_pos[0], ret_pos[1])
+            elif consecutive_unknown == 1:
+                log.info("UNKNOWN x1 — tap (640, 400) to advance reward")
                 adb.tap(640, 400)
             elif consecutive_unknown == 2:
                 close_pos = find_red_close_x(frame)
@@ -392,7 +401,7 @@ def main() -> None:
                     log.info(f"UNKNOWN x2 — tap red close-X at {close_pos}")
                     adb.tap(close_pos[0], close_pos[1])
                 else:
-                    adb.back()
+                    adb.tap(640, 595)
             elif consecutive_unknown == 3:
                 adb.back()
             adb.wait_random(1.0, 2.0)
