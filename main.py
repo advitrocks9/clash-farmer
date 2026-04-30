@@ -45,6 +45,7 @@ from planner.gemini import plan
 from screen import templates as tmpl
 from screen.capture import grab_frame_bgr
 from screen.ocr import read_resources
+from recovery import recover_to_home
 from screen.state import GameState, StateDetector, find_red_close_x
 from upgrade.execute import execute_hero_upgrade, execute_upgrade
 
@@ -532,52 +533,34 @@ def main() -> None:
 
         if state == GameState.UNKNOWN:
             consecutive_unknown += 1
-            # Two CoC restarts didn't recover — game is likely in a
-            # maintenance break, login flow, or network outage. Sleep then
-            # retry rather than spinning every 1.5s.
-            if consecutive_unknown >= 12:
-                log.warning("UNKNOWN x12 — long sleep (5 min) then retry")
-                time.sleep(300)
-                state_detector.reset()
+            # Three-tier recovery: BACK-walk → CoC restart → Gemini Vision pilot.
+            # Try the cheap tier first, escalate only when the previous one fails.
+            if consecutive_unknown == 1:
+                # Quick: a btn_return_home tap (defense replay, visit-village,
+                # result screen outside its ROI) + a chest-center tap.
+                ret = template_set.get("btn_return_home")
+                ret_pos = tmpl.find(frame, ret, threshold=0.6) if ret is not None else None
+                if ret_pos is not None:
+                    log.info(f"UNKNOWN x1 — tap Return Home at {ret_pos}")
+                    adb.tap(ret_pos[0], ret_pos[1])
+                else:
+                    adb.tap(640, 360)
+                adb.wait_random(1.0, 2.0)
+                continue
+            log.warning(f"UNKNOWN x{consecutive_unknown} — invoking recover_to_home")
+            telegram.send(f"⚠️ stuck in UNKNOWN x{consecutive_unknown} — running recovery", silent=True)
+            if recover_to_home(adb, state_detector):
                 consecutive_unknown = 0
+                telegram.send("✅ recovery succeeded — back at HOME", silent=True)
                 continue
-            if consecutive_unknown >= 8 and consecutive_unknown % 4 == 0:
-                log.warning(f"UNKNOWN x{consecutive_unknown} — force-restarting CoC")
-                adb.kill_coc()
-                time.sleep(2)
-                adb.launch_coc()
-                time.sleep(20)
-                state_detector.reset()
-                continue
-            # Recovery ladder for unknown screens:
-            # 1st: any "Return Home" button on screen (defense replay,
-            #      visit-village, post-attack result outside the RESULT ROI).
-            # 2nd-3rd: tap chest/item center + Continue button — most
-            #      "stuck" situations are chained reward animations.
-            # 4th-5th: red close-X / BACK for modals.
-            # 8+: CoC restart (handled below).
-            ret = template_set.get("btn_return_home")
-            ret_pos = tmpl.find(frame, ret, threshold=0.6) if ret is not None else None
-            if consecutive_unknown == 1 and ret_pos is not None:
-                log.info(f"UNKNOWN x1 — tap Return Home at {ret_pos}")
-                adb.tap(ret_pos[0], ret_pos[1])
-            elif consecutive_unknown in (1, 2, 3):
-                # Chest sequences chain 3-5 screens; tap chest then Continue
-                # in alternating attempts.
-                if consecutive_unknown % 2 == 1:
-                    adb.tap(640, 400)
-                else:
-                    adb.tap(640, 595)
-            elif consecutive_unknown in (4, 5):
-                close_pos = find_red_close_x(frame)
-                if close_pos is not None:
-                    log.info(f"UNKNOWN x{consecutive_unknown} — red close-X")
-                    adb.tap(close_pos[0], close_pos[1])
-                else:
-                    adb.back()
-            elif consecutive_unknown in (6, 7):
-                adb.back()
-            adb.wait_random(1.0, 2.0)
+            # All three tiers exhausted. Sleep then retry — the game is
+            # likely in maintenance, login flow, or a network outage we
+            # can't poke our way out of.
+            log.error("recover_to_home exhausted all tiers — sleeping 5 min")
+            telegram.send("❌ recovery failed — sleeping 5 min before next attempt")
+            time.sleep(300)
+            state_detector.reset()
+            consecutive_unknown = 0
             continue
 
         if state != GameState.HOME:
@@ -672,18 +655,19 @@ def main() -> None:
                 "result": "failed",
                 "abort_reason": abort_reason,
             })
-            if consecutive_failures >= 5:
-                log.warning("Too many failures — force-restarting CoC")
+            if consecutive_failures >= 3:
                 telegram.send(
-                    f"clash-farmer: 5 cycles failed in a row "
-                    f"(last reason: {abort_reason}). Restarting CoC."
+                    f"⚠️ {consecutive_failures} cycles failed in a row "
+                    f"(last: {abort_reason}). Running full recovery."
                 )
-                adb.kill_coc()
-                time.sleep(2)
-                adb.launch_coc()
-                time.sleep(20)
-                state_detector.reset()
-                consecutive_failures = 0
+                if recover_to_home(adb, state_detector):
+                    telegram.send("✅ recovery succeeded — resuming farming")
+                    consecutive_failures = 0
+                else:
+                    telegram.send("❌ recovery failed — sleeping 5 min")
+                    time.sleep(300)
+                    state_detector.reset()
+                    consecutive_failures = 0
             adb.wait(5)
 
 
