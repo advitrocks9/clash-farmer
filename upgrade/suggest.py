@@ -42,6 +42,25 @@ TOOLTIP_ROW_X = 550  # left-of-centre column, lands inside any row
 CONFIRM_BTN = (897, 629)
 
 
+def _row_cost_kind(frame: np.ndarray, y: int) -> str:
+    """Inspect the cost-icon hue at row y to determine 'gold'/'elixir'/
+    'dark'/'unknown'. The icon sits at approximately (697, y).
+    """
+    # Sample a small box around the icon position
+    crop = frame[max(0, y - 12):y + 12, 685:715]
+    if crop.size == 0:
+        return "unknown"
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    gold   = int(cv2.inRange(hsv, np.array([20, 150, 150]), np.array([35, 255, 255])).sum() / 255)
+    elixir = int(cv2.inRange(hsv, np.array([140, 100, 100]), np.array([175, 255, 255])).sum() / 255)
+    dark   = int(cv2.inRange(hsv, np.array([110, 30, 20]), np.array([140, 200, 110])).sum() / 255)
+    counts = {"gold": gold, "elixir": elixir, "dark": dark}
+    best = max(counts, key=counts.get)
+    if counts[best] < 8:
+        return "unknown"
+    return best
+
+
 def _suggestion_row_ys(frame: np.ndarray) -> list[int]:
     """Y positions of rows in the 'Suggested upgrades' section ONLY.
 
@@ -230,9 +249,12 @@ def upgrade_top_suggestion(
     adb: ADB,
     template_set: dict[str, "tmpl.Template"],
     kind: Literal["builder", "lab"],
+    prefer_cost: str | None = None,
 ) -> bool:
-    """Open the suggestion tooltip, tap the first suggested-upgrades row,
-    upgrade the building it navigates to. Returns True if upgrade started.
+    """Open the suggestion tooltip, tap a row, start the upgrade.
+
+    `prefer_cost` ('gold' / 'elixir' / 'dark'): if given, pick the first
+    row whose cost icon matches. Falls back to the first row if no match.
     """
     info_pos = BUILDER_INFO_POS if kind == "builder" else LAB_INFO_POS
 
@@ -246,8 +268,19 @@ def upgrade_top_suggestion(
         _dismiss(adb)
         return False
 
+    # Pick the first row whose cost matches `prefer_cost`. Else first row.
     row_y = rows[0]
-    log.info(f"suggest[{kind}]: tapping first suggestion row at y={row_y}")
+    if prefer_cost:
+        row_costs = [(y, _row_cost_kind(frame, y)) for y in rows]
+        log.info(f"suggest[{kind}]: rows={row_costs} prefer={prefer_cost}")
+        for y, c in row_costs:
+            if c == prefer_cost:
+                row_y = y
+                break
+        else:
+            log.info(f"suggest[{kind}]: no row with cost={prefer_cost}, taking first")
+
+    log.info(f"suggest[{kind}]: tapping suggestion row at y={row_y}")
     adb.tap_precise(TOOLTIP_ROW_X, row_y)
     adb.wait_random(2.0, 3.0)
 

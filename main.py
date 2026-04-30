@@ -658,24 +658,32 @@ def main() -> None:
             log.info(f"resource {kind} maxed — running spend flow")
             try:
                 actions: list[str] = []
-                # 1. ONE builder suggestion. We need at least 2 free builders
-                #    so a wall fallback later isn't blocked. When the OCR
-                #    can't read the count (None), trust the suggestion flow
-                #    itself — Gate 1's card-text check rejects builder-busy
-                #    cards (no Upgrade text) anyway.
+                # 1. Builder suggestion — prefer a row whose cost matches
+                #    the maxed resource. So if dark is full, we pick the
+                #    first dark-paying suggestion (heroes, dark spells, etc).
+                cost_pref = {
+                    "gold": "gold",
+                    "elixir": "elixir",
+                    "dark_elixir": "dark",
+                }.get(kind)
                 may_use_builder = (
-                    free_builders is None  # OCR failed → trust the gates
-                    or free_builders >= 2  # known safe
+                    free_builders is None or free_builders >= 2
                 )
                 if may_use_builder:
-                    if suggest.upgrade_top_suggestion(adb, template_set, kind="builder"):
+                    if suggest.upgrade_top_suggestion(
+                        adb, template_set, kind="builder", prefer_cost=cost_pref
+                    ):
                         actions.append("builder")
-                # 2. Lab suggestion DISABLED — the Lab UI has a different
-                #    layout (tabs, research tiles, no bottom Upgrade button).
-                #    Tapping a row opens the Lab building modal which our
-                #    bottom-card-OCR gate refuses, but the bot then needs a
-                #    multi-step recovery to get back to HOME. Re-enable when
-                #    upgrade.lab_research is implemented.
+                # 2. Lab suggestion — same flow, lab queue is independent
+                #    of builders. The lab tooltip lists research items by
+                #    cost; tapping a row should navigate to the Lab and
+                #    open the research dialog. Re-enabled with Gate 1
+                #    protecting against unexpected card layouts.
+                if not actions and kind in ("elixir", "dark_elixir"):
+                    if suggest.upgrade_top_suggestion(
+                        adb, template_set, kind="lab", prefer_cost=cost_pref
+                    ):
+                        actions.append("lab")
                 # 3. ONE pet-house attempt for elixir.
                 if kind == "elixir":
                     if suggest.upgrade_pet_house(adb, template_set):
