@@ -74,64 +74,61 @@ def _row_cost_kind(frame: np.ndarray, y: int) -> str:
 
 
 def _suggestion_row_ys(frame: np.ndarray) -> list[int]:
-    """Y positions of rows in the 'Suggested upgrades' section ONLY.
+    """Y positions of rows in the 'Suggested upgrades' section.
 
-    The tooltip has three sections, top to bottom:
-      Upgrades in progress:  ← clock-icon rows (skip)
-      Suggested upgrades:    ← gold/elixir/dark cost rows (target)
-      Other upgrades:        ← more cost rows (skip — these are too
-                              expensive or low-priority per game)
+    OCRs the tooltip text and returns the Y coordinate of each cost
+    number (e.g. '200 000', '12 000 000') between the 'Suggested
+    upgrades:' header and the 'Other upgrades:' divider. Falls back
+    cleanly when headers aren't OCR'd.
 
-    We OCR the tooltip text column to locate the 'Suggested upgrades:'
-    header line, then return only the rows below it (and above the
-    'Other upgrades:' header).
+    OCR-driven (vs pixel projection) so it works for both the builder
+    tooltip (rows ~28px apart) and the lab tooltip (rows ~38px apart),
+    and adapts when the tooltip shifts as upgrades start/finish.
     """
+    import re
     from screen.ocr import _get_reader
-    # Run OCR on a wider crop to capture row text + headers
-    crop = frame[100:430, 320:920]
+
+    # Wide crop covering the tooltip area
+    crop = frame[60:430, 200:920]
     upscaled = cv2.resize(crop, (crop.shape[1] * 2, crop.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
     reader = _get_reader()
     results = reader.readtext(upscaled, detail=1, paragraph=False)
-    # Find Y bounds of 'Suggested' section in the upscaled-then-mapped frame.
-    suggest_y = None
-    other_y = None
-    for bbox, text, _ in results:
-        text_l = text.lower()
-        # 'sugg' covers OCR variants like 'sugges' / '@uggested'
-        if "sugg" in text_l and suggest_y is None:
-            ys = [pt[1] for pt in bbox]
-            suggest_y = (min(ys) // 2) + 100  # back to frame coords
-        if "other" in text_l and other_y is None:
-            ys = [pt[1] for pt in bbox]
-            other_y = (min(ys) // 2) + 100
-    if suggest_y is None:
-        suggest_y = 200  # fallback
-    if other_y is None:
-        other_y = 380
 
-    # Start scanning AFTER the 'Suggested upgrades:' header line itself —
-    # the header text sits at the suggest_y baseline, the first actual row
-    # begins ~22px below it.
-    scan_start = suggest_y + 22
-    scan_end = max(scan_start + 30, other_y - 5)
-    band = frame[scan_start:scan_end, 670:720]
-    if band.size == 0:
-        return []
-    hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
-    sat = cv2.inRange(hsv, np.array([0, 90, 80]), np.array([180, 255, 255]))
-    proj = sat.sum(axis=1)
-    rows: list[int] = []
-    last_y = -100
-    for y, v in enumerate(proj):
-        if v > 100 and y - last_y > 24:  # min 24px between rows
-            rows.append(y + scan_start)
-            last_y = y
-    # The 'Suggested upgrades:' section in CoC's tooltip caps at 3 rows
-    # before the 'Other upgrades:' divider. OCR sometimes misses the
-    # divider header (small text), so we hard-cap the row list at 3
-    # to avoid leaking into the Other section.
+    cost_re = re.compile(r"\d{2,3}(?:[\s,]\d{3}){1,3}")  # '200 000' or '12,000,000'
+    # Build a (y, kind) timeline. kind ∈ {'header', 'cost'}.
+    # Headers are non-numeric text lines that look like 'Xxx upgrades:'.
+    # Costs are numbers like '200 000' / '12,000,000'.
+    timeline: list[tuple[int, str, str]] = []
+    for bbox, text, conf in results:
+        text_l = text.lower()
+        ys = [pt[1] for pt in bbox]
+        y_frame = (min(ys) // 2) + 60
+        if cost_re.search(text) and conf > 0.4:
+            timeline.append((y_frame, "cost", text))
+        elif "upgr" in text_l or "grad" in text_l:
+            timeline.append((y_frame, "header", text_l))
+    timeline.sort(key=lambda t: t[0])
+
+    # Walk timeline. Find first 'header' that says 'Suggested', then take
+    # all 'cost' rows until the next 'header' (or end).
+    suggest_y: int | None = None
+    other_y: int | None = None
+    for y, kind, text in timeline:
+        if kind == "header" and "sugg" in text and suggest_y is None:
+            suggest_y = y
+            continue
+        if kind == "header" and suggest_y is not None and "sugg" not in text:
+            other_y = y
+            break
+    if suggest_y is None:
+        suggest_y = 0
+    if other_y is None:
+        other_y = 9999
+
+    rows = sorted(y for y, kind, _ in timeline
+                  if kind == "cost" and suggest_y < y < other_y)
     rows = rows[:3]
-    log.info(f"suggestion rows: header={suggest_y} scan={scan_start}-{scan_end} rows={rows}")
+    log.info(f"suggestion rows: suggest={suggest_y} other={other_y} rows={rows}")
     return rows
 
 
@@ -328,30 +325,35 @@ def upgrade_top_suggestion(
         adb.wait_random(2.0, 3.0)
 
         frame = grab_frame_bgr(adb)
-        safe, reason = _safe_to_upgrade(frame)
-        if not safe:
-            log.info(f"suggest[{kind}]: row {attempt + 1} not safe — {reason}")
-            _dismiss(adb)
-            # Reopen the tooltip for the next attempt.
-            if attempt + 1 < min(3, len(ordered)):
-                adb.tap_precise(*info_pos)
-                adb.wait_random(0.8, 1.4)
-            continue
 
-        upgrade_pos = _find_upgrade_button(frame)
-        if upgrade_pos is None:
-            log.info(f"suggest[{kind}]: row {attempt + 1} — no Upgrade button")
-            _dismiss(adb)
-            if attempt + 1 < min(3, len(ordered)):
-                adb.tap_precise(*info_pos)
-                adb.wait_random(0.8, 1.4)
-            continue
+        # Lab tooltip rows go DIRECTLY to the confirm dialog (no
+        # intermediate building card with an Upgrade button). For lab
+        # we skip the Gate-1 card-text check (which expects 'Upgrade'
+        # text) and the _find_upgrade_button step.
+        if kind == "builder":
+            safe, reason = _safe_to_upgrade(frame)
+            if not safe:
+                log.info(f"suggest[{kind}]: row {attempt + 1} not safe — {reason}")
+                _dismiss(adb)
+                if attempt + 1 < min(3, len(ordered)):
+                    adb.tap_precise(*info_pos)
+                    adb.wait_random(0.8, 1.4)
+                continue
 
-        log.info(f"suggest[{kind}]: tapping Upgrade at {upgrade_pos}")
-        adb.tap_precise(*upgrade_pos)
-        adb.wait_random(1.0, 1.5)
+            upgrade_pos = _find_upgrade_button(frame)
+            if upgrade_pos is None:
+                log.info(f"suggest[{kind}]: row {attempt + 1} — no Upgrade button")
+                _dismiss(adb)
+                if attempt + 1 < min(3, len(ordered)):
+                    adb.tap_precise(*info_pos)
+                    adb.wait_random(0.8, 1.4)
+                continue
 
-        frame = grab_frame_bgr(adb)
+            log.info(f"suggest[{kind}]: tapping Upgrade at {upgrade_pos}")
+            adb.tap_precise(*upgrade_pos)
+            adb.wait_random(1.0, 1.5)
+            frame = grab_frame_bgr(adb)
+
         if not _confirm_button_visible(frame):
             log.info(f"suggest[{kind}]: row {attempt + 1} — no confirm dialog")
             x = find_red_close_x(frame, region=(1080, 0, 1280, 200))
