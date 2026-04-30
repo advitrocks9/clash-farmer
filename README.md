@@ -1,8 +1,10 @@
 # clash-farmer
 
-Home-base farming bot for Clash of Clans on BlueStacks (macOS). Drives the standard farm loop via ADB and template matching; optional Gemini hook for upgrade decisions when storages fill.
+Home-base farming bot for Clash of Clans on BlueStacks (macOS). Drives the standard farm loop via ADB and template matching; optional Gemini hook for upgrade decisions when storages fill; optional Telegram digest.
 
 ```bash
+./bin/run        # one-shot: prereq checks + uv sync + adb connect + launch CoC + start
+# or:
 uv sync
 uv run python main.py
 ```
@@ -13,7 +15,9 @@ uv run python main.py
 - ADB enabled in BlueStacks Settings → Advanced
 - 1280×720 @ 240 DPI
 - Logged in to Clash of Clans on the home village
-- `.env` with `GEMINI_API_KEY` (only needed if you enable the planner)
+- `.env` (all optional):
+  - `GEMINI_API_KEY` — enables the upgrade planner
+  - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — hourly digest of cycles, score, errors
 
 ## Loop
 
