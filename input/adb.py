@@ -99,17 +99,19 @@ class ADB:
         self._random_delay()
 
     def bluestacks_zoom_out(self, taps: int = 6) -> None:
-        """Send UP-arrow keystrokes to BlueStacks via macOS osascript.
-
-        BlueStacks' default Clash of Clans keymap binds UP arrow to in-game
-        pinch-out. ADB key events bypass that keymap, so we have to drive the
-        host keyboard. This briefly steals focus from the user's frontmost
-        app — Accessibility permission for Python would let us swap to
-        Quartz CGEventPostToPid and avoid the focus steal entirely.
+        """Send UP-arrow keystrokes to BlueStacks (default CoC keymap binds it
+        to in-game pinch-out). ADB key events bypass BlueStacks' keymap layer,
+        so the keystroke has to come from the host. We save the user's
+        currently-focused app, activate BlueStacks, send the keys, then
+        restore the previous app — total disturbance ~400 ms.
         """
         script = f'''
+set prev to ""
+try
+  tell application "System Events" to set prev to name of (first process whose frontmost is true)
+end try
 tell application "BlueStacks" to activate
-delay 0.3
+delay 0.2
 tell application "System Events"
   tell process "BlueStacks"
     repeat {taps} times
@@ -118,6 +120,12 @@ tell application "System Events"
     end repeat
   end tell
 end tell
+delay 0.05
+if prev is not "" and prev is not "BlueStacks" then
+  try
+    tell application prev to activate
+  end try
+end if
 '''
         subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
 
