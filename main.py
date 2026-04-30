@@ -349,6 +349,8 @@ def main() -> None:
     session_anchor = time.time()
     digest_loot = {"gold": 0, "elixir": 0, "dark_elixir": 0}
     session_loot = {"gold": 0, "elixir": 0, "dark_elixir": 0}
+    last_planner_run = 0.0
+    PLANNER_MIN_GAP_S = 1800  # at most one Gemini call every 30 min
 
     while True:
         frame = grab_frame_bgr(adb)
@@ -435,9 +437,13 @@ def main() -> None:
 
         # Planner reads CoC's JSON export via Settings → More → Copy Data,
         # then `pbpaste` (BlueStacks mirrors Android clipboard to the host).
-        if check_resources_near_max(resources, config):
+        # Resource OCR is noisy enough that the storages-near-max gate is
+        # unreliable, so we also trigger on a 30-min timer.
+        time_for_planner = time.time() - last_planner_run > PLANNER_MIN_GAP_S
+        if time_for_planner or check_resources_near_max(resources, config):
             try:
                 run_planner(adb, template_set, config)
+                last_planner_run = time.time()
             except Exception as e:
                 log.error(f"planner failed, continuing farm: {e}")
 
