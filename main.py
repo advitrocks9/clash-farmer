@@ -314,6 +314,14 @@ def attack_cycle(
             last_state_change = time.time()
         if state == GameState.HOME:
             break
+        if state == GameState.BATTLE:
+            # Still in battle — monitor_battle exited early. Surrender now.
+            log.warning("  return-home: still in BATTLE — issuing surrender")
+            adb.tap_precise(85, 540)
+            time.sleep(0.6)
+            adb.tap_precise(782, 412)
+            time.sleep(1.2)
+            continue
         if state == GameState.MODAL:
             pos = find_red_close_x(frame)
             if pos:

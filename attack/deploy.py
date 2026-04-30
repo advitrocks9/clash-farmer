@@ -95,12 +95,14 @@ def monitor_battle(
     """
     btn_return = template_set.get("btn_return_home")
     btn_surrender = template_set.get("btn_surrender")
+    btn_end_battle = template_set.get("btn_end_battle")
 
     last_loot: int | None = None
     plateau_count = 0
     max_plateau = 3
     check_interval = 1.0
     started_at = time.time()
+    battle_btn_roi = (0, 500, 200, 580)
 
     while True:
         if time.time() - started_at > max_battle_seconds:
@@ -113,10 +115,22 @@ def monitor_battle(
         if btn_return is not None and tmpl.exists(frame, btn_return, threshold=0.6):
             log.info("Battle ended (return-home button visible)")
             return
-        if btn_surrender is not None and not tmpl.exists(
-            frame, btn_surrender, threshold=0.7, roi=(0, 500, 200, 580)
-        ) and time.time() - started_at > 6:
-            log.info("Battle ended (surrender button gone)")
+        # Surrender button text swaps to "End Battle" once troops are deployed.
+        # Battle has only really ended when NEITHER label is present at the
+        # bottom-left button position.
+        surrender_present = btn_surrender is not None and tmpl.exists(
+            frame, btn_surrender, threshold=0.7, roi=battle_btn_roi
+        )
+        end_battle_present = btn_end_battle is not None and tmpl.exists(
+            frame, btn_end_battle, threshold=0.7, roi=battle_btn_roi
+        )
+        if (
+            (btn_surrender is not None or btn_end_battle is not None)
+            and not surrender_present
+            and not end_battle_present
+            and time.time() - started_at > 6
+        ):
+            log.info("Battle ended (surrender/end-battle button gone)")
             return
 
         current_loot = read_number(frame, get_roi("loot_gained"))
