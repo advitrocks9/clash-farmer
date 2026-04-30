@@ -82,6 +82,22 @@ def close_modal(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
 CRASH_DIR = Path(__file__).resolve().parent / "local" / "crashes"
 
 
+def _connection_lost_popup(frame) -> bool:
+    """Detect the dark-grey 'Connection lost' popup overlay.
+
+    The popup is a 600×300 dark rectangle centred on screen with a blue
+    'TRY AGAIN' link in the lower-left. We just check the centre pixel is
+    near-black and the popup background dominates a wide region — cheap
+    enough to run every loop tick.
+    """
+    import numpy as np
+    # Centre band of the popup body (avoid the underlying battle screen).
+    band = frame[300:380, 360:920]
+    avg = band.mean(axis=(0, 1))
+    # Dark grey BGR ≈ (35, 35, 35), tolerance ±15 across channels.
+    return bool(np.all(avg < 60) and np.all(avg > 15) and abs(avg[0] - avg[2]) < 12)
+
+
 def _save_crash_dump(adb: ADB, reason: str, info: dict) -> None:
     # Save the failing frame + cycle info so the failure is debuggable
     # post-mortem without having to reproduce live.
@@ -539,9 +555,24 @@ def main() -> None:
     telegram.send("🚀 clash-farmer started — /help for commands", silent=True)
 
     while True:
-        pause_event.wait()
-        frame = grab_frame_bgr(adb)
-        state = state_detector.detect(frame)
+        try:
+            pause_event.wait()
+            frame = grab_frame_bgr(adb)
+            state = state_detector.detect(frame)
+        except Exception as e:
+            log.error(f"main loop frame/detect failed: {e} — sleep 10s and retry")
+            time.sleep(10)
+            continue
+
+        # Connection-lost popup — Supercell servers dropped us. Tap the
+        # blue "TRY AGAIN" text link to reconnect.
+        if _connection_lost_popup(frame):
+            log.warning("connection-lost popup detected — tapping TRY AGAIN")
+            telegram.send("📡 connection lost popup — tapping TRY AGAIN", silent=True)
+            adb.tap_precise(380, 440)
+            adb.wait_random(8.0, 15.0)
+            state_detector.reset()
+            continue
 
         if state == GameState.MODAL:
             close_modal(adb, template_set)
