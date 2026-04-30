@@ -13,7 +13,6 @@ dependencies = [
     "pyyaml",
     "pillow",
     "python-dotenv>=1.2.2",
-    "pyobjc-framework-quartz>=12.1",
 ]
 
 [tool.ruff]

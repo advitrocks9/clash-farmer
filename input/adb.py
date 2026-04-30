@@ -98,105 +98,28 @@ class ADB:
         self._run(f"input swipe {x1} {y1} {x2} {y2} {duration_ms}")
         self._random_delay()
 
-    def scroll(self, dx: int = 0, dy: int = -5) -> None:
-        self._run(f"input roll {dx} {dy}")
-        self._random_delay()
-
-    def zoom_out(self, steps: int = 5) -> None:
-        # Trackball-roll fallback (works on physical devices, not BlueStacks).
-        for _ in range(steps):
-            self.scroll(dy=-3)
-            time.sleep(0.1)
-
-    def bluestacks_zoom_out(self, taps: int = 8) -> None:
+    def bluestacks_zoom_out(self, taps: int = 6) -> None:
         """Send UP-arrow keystrokes to BlueStacks via macOS osascript.
 
         BlueStacks' default Clash of Clans keymap binds UP arrow to in-game
-        zoom-out. ADB key events bypass BlueStacks' keymap layer, so we send
-        the keystroke from the host. This stelas focus briefly while the
-        keys are sent — there is no way to drive BlueStacks' keymap headless
-        without Input Monitoring permission for the Python process.
+        pinch-out. ADB key events bypass that keymap, so we have to drive the
+        host keyboard. This briefly steals focus from the user's frontmost
+        app — Accessibility permission for Python would let us swap to
+        Quartz CGEventPostToPid and avoid the focus steal entirely.
         """
         script = f'''
 tell application "BlueStacks" to activate
-delay 0.4
+delay 0.3
 tell application "System Events"
   tell process "BlueStacks"
     repeat {taps} times
       key code 126
-      delay 0.05
+      delay 0.04
     end repeat
   end tell
 end tell
 '''
         subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
-
-    def pinch_zoom_out(
-        self,
-        steps: int = 6,
-        spread_start: int = 300,
-        spread_end: int = 80,
-        center: tuple[int, int] = (640, 360),
-    ) -> None:
-        """Two-finger pinch via raw multitouch on /dev/input/event2.
-
-        BlueStacks ignores `input roll` and KEYCODE_ZOOM_OUT, so we drive the
-        virtual touchscreen directly. Coordinates are scaled to ABS range
-        (0-32767) which the BlueStacks Virtual Touch device expects.
-        """
-        x_factor = 32767 / 1280
-        y_factor = 32767 / 720
-        cx, cy = center
-
-        def to_abs(x: int, y: int) -> tuple[int, int]:
-            return int(x * x_factor), int(y * y_factor)
-
-        cmds: list[str] = []
-
-        def emit(typ: int, code: int, value: int) -> None:
-            cmds.append(f"sendevent /dev/input/event2 {typ} {code} {value}")
-
-        def syn() -> None:
-            emit(0, 0, 0)
-
-        # Press both fingers at the outer positions (horizontal pinch).
-        x0, y0 = to_abs(cx - spread_start, cy)
-        x1, y1 = to_abs(cx + spread_start, cy)
-        emit(3, 47, 0)
-        emit(3, 57, 100)
-        emit(3, 53, x0)
-        emit(3, 54, y0)
-        emit(3, 47, 1)
-        emit(3, 57, 101)
-        emit(3, 53, x1)
-        emit(3, 54, y1)
-        syn()
-
-        # Move both fingers inward over `steps` increments.
-        for step in range(1, steps + 1):
-            t = step / steps
-            spread = spread_start + (spread_end - spread_start) * t
-            x0, _ = to_abs(int(cx - spread), cy)
-            x1, _ = to_abs(int(cx + spread), cy)
-            emit(3, 47, 0)
-            emit(3, 53, x0)
-            emit(3, 47, 1)
-            emit(3, 53, x1)
-            syn()
-
-        # Release both fingers.
-        emit(3, 47, 0)
-        emit(3, 57, -1)
-        emit(3, 47, 1)
-        emit(3, 57, -1)
-        syn()
-
-        script = "\n".join(cmds)
-        subprocess.run(
-            ["adb", "-s", self._addr, "shell", script],
-            capture_output=True,
-            timeout=10,
-        )
 
     def back(self) -> None:
         self._run("input keyevent 4")
