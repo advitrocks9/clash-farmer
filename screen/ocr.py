@@ -55,9 +55,16 @@ def _get_reader() -> easyocr.Reader:
     return _reader
 
 
-def _preprocess(crop: np.ndarray, scale: int = 3) -> np.ndarray:
+def _preprocess(crop: np.ndarray, scale: int = 3, binarize: bool = False) -> np.ndarray:
+    # Resource pills have variable backgrounds (gold yellow, elixir purple,
+    # dark-elixir near-black). Otsu binarization works for one and inverts the
+    # others, so by default we just upscale and let EasyOCR work on raw color.
+    # `binarize=True` is for the loot warmup screen where backgrounds are
+    # uniform dark and binarization helps.
     h, w = crop.shape[:2]
     upscaled = cv2.resize(crop, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+    if not binarize:
+        return upscaled
     gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
     kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
     sharpened = cv2.filter2D(gray, -1, kernel)
