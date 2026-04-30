@@ -658,10 +658,16 @@ def main() -> None:
             log.info(f"resource {kind} maxed — running spend flow")
             try:
                 actions: list[str] = []
-                # 1. ONE builder suggestion if we can still afford to consume
-                #    a builder slot. Skipped if free_builders < 2 so wall
-                #    fallback never gets blocked.
-                if free_builders is not None and free_builders >= 2:
+                # 1. ONE builder suggestion. We need at least 2 free builders
+                #    so a wall fallback later isn't blocked. When the OCR
+                #    can't read the count (None), trust the suggestion flow
+                #    itself — Gate 1's card-text check rejects builder-busy
+                #    cards (no Upgrade text) anyway.
+                may_use_builder = (
+                    free_builders is None  # OCR failed → trust the gates
+                    or free_builders >= 2  # known safe
+                )
+                if may_use_builder:
                     if suggest.upgrade_top_suggestion(adb, template_set, kind="builder"):
                         actions.append("builder")
                 # 2. Lab suggestion DISABLED — the Lab UI has a different
