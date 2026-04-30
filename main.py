@@ -278,15 +278,20 @@ def attack_cycle(
     # otherwise the loop keeps tapping after we've returned and accidentally
     # opens the Shop (1230, 700 = Shop icon on home).
     from screen.state import classify, detect_signals
-    for _ in range(20):
+    for i in range(24):
         frame = grab_frame_bgr(adb)
         sig = detect_signals(frame, template_set, threshold=0.70)
         if classify(sig) == GameState.HOME:
             break
-        adb.tap(640, 400)        # tap chest/item to advance the open animation
+        # Alternate chest/center, Continue, and BACK every few attempts —
+        # BACK closes Shop / Treasure / etc. that we accidentally opened.
+        if i % 4 == 3:
+            adb.back()
+        elif i % 2 == 0:
+            adb.tap(640, 400)
+        else:
+            adb.tap(640, 595)
         time.sleep(0.4)
-        adb.tap(640, 595)        # tap Continue button for reveal screens
-        time.sleep(0.5)
 
     if not state_detector.wait_for(GameState.HOME, lambda: grab_frame_bgr(adb), timeout=25.0):
         log.error("Could not return to HOME after attack — needs CoC restart")
