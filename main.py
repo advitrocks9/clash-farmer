@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -354,12 +355,12 @@ def main() -> None:
 
     session_start = time.time()
     attack_count = 0
+    failed_count = 0
     consecutive_failures = 0
     consecutive_unknown = 0
     home_zoomed_out = False
 
     log.info("Starting farming loop")
-    telegram.send("clash-farmer started", silent=True)
     digest_anchor = time.time()
     session_anchor = time.time()
     digest_loot = {"gold": 0, "elixir": 0, "dark_elixir": 0}
@@ -367,7 +368,68 @@ def main() -> None:
     last_planner_run = 0.0
     PLANNER_MIN_GAP_S = 1800  # at most one Gemini call every 30 min
 
+    pause_event = threading.Event()
+    pause_event.set()  # set = run; clear = pause
+
+    def _fmt_score(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.2f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.0f}K"
+        return str(n)
+
+    def _status_text() -> str:
+        secs = int(time.time() - session_anchor)
+        score = loot_score(**session_loot)
+        rate = int(score * 3600 / max(secs, 1))
+        running = "running" if pause_event.is_set() else "<b>paused</b>"
+        return (
+            f"<b>clash-farmer</b> — {running}\n"
+            f"uptime: {secs // 3600}h{(secs % 3600) // 60}m\n"
+            f"cycles: {attack_count} ok / {failed_count} fail\n"
+            f"score: {_fmt_score(score)} ({_fmt_score(rate)}/hr)\n"
+            f"  gold {session_loot['gold']:,}\n"
+            f"  elixir {session_loot['elixir']:,}\n"
+            f"  dark {session_loot['dark_elixir']:,}\n"
+            f"state: {state_detector.current.name}"
+        )
+
+    def _send_screenshot(_: str = "") -> str | None:
+        import subprocess
+        path = Path("/tmp/clash_farmer_screenshot.png")
+        with open(path, "wb") as f:
+            subprocess.run(
+                ["adb", "-s", adb._addr, "exec-out", "screencap", "-p"],
+                stdout=f, timeout=10, check=False,
+            )
+        telegram.send_photo(path, caption=_status_text())
+        return None
+
+    poller = telegram.CommandPoller()
+    poller.on("/start", lambda _: _status_text())
+    poller.on("/status", lambda _: _status_text())
+    poller.on("/score", lambda _: _status_text())
+    poller.on("/screenshot", _send_screenshot)
+    poller.on("/photo", _send_screenshot)
+    poller.on("/pause", lambda _: (pause_event.clear(), "paused — call /resume to continue")[1])
+    poller.on("/resume", lambda _: (pause_event.set(), "resumed")[1])
+    poller.on("/restart", lambda _: (
+        adb.kill_coc(), time.sleep(2), adb.launch_coc(),
+        "restarted CoC; bot will resume when home detected"
+    )[3])
+    poller.on("/help", lambda _: (
+        "<b>commands</b>\n"
+        "/status — uptime, cycles, score, current state\n"
+        "/screenshot — current BlueStacks frame\n"
+        "/pause — stop the loop (won't kill CoC)\n"
+        "/resume — start the loop again\n"
+        "/restart — kill+launch CoC"
+    ))
+    poller.start()
+    telegram.send(f"clash-farmer started — /help for commands", silent=True)
+
     while True:
+        pause_event.wait()
         frame = grab_frame_bgr(adb)
         state = state_detector.detect(frame)
 
@@ -516,6 +578,7 @@ def main() -> None:
                 digest_loot = {"gold": 0, "elixir": 0, "dark_elixir": 0}
         else:
             consecutive_failures += 1
+            failed_count += 1
             abort_reason = info.get("abort", "unknown")
             log.warning(
                 f"Attack cycle failed [{abort_reason}] ({consecutive_failures} in a row) — retrying in 5s"
