@@ -13,6 +13,15 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 RAID_LOG = Path(__file__).resolve().parent / "local" / "raid_log.jsonl"
 
+# Dark elixir is rarer than gold/elixir. The combined-loot metric weights it
+# at 12× — middle of the 10-15 range used by most farming guides — so the
+# optimisation target reflects what's actually scarce.
+DARK_WEIGHT = 12
+
+
+def loot_score(gold: int = 0, elixir: int = 0, dark: int = 0) -> int:
+    return gold + elixir + dark * DARK_WEIGHT
+
 
 def append_raid_log(entry: dict) -> None:
     RAID_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -28,6 +37,7 @@ from attack.deploy import (
     wait_for_result_screen,
 )
 from attack.search import LootThresholds, end_battle_warmup, enter_matchmaking, search_loop
+from bot import telegram
 from input.adb import ADB, ADBConfig
 from planner.export import parse_export, state_to_planner_json
 from planner.gemini import plan
@@ -335,6 +345,11 @@ def main() -> None:
     home_zoomed_out = False
 
     log.info("Starting farming loop")
+    telegram.send("clash-farmer started", silent=True)
+    digest_anchor = time.time()
+    session_anchor = time.time()
+    digest_loot = {"gold": 0, "elixir": 0, "dark_elixir": 0}
+    session_loot = {"gold": 0, "elixir": 0, "dark_elixir": 0}
 
     while True:
         frame = grab_frame_bgr(adb)
@@ -424,6 +439,7 @@ def main() -> None:
             attack_count += 1
             consecutive_failures = 0
             delta = info.get("delta", {})
+            seen = info.get("loot") or {}
             log.info(
                 f"Attack #{attack_count} complete ({cycle_duration:.1f}s) Δ "
                 f"gold={delta.get('gold')} elixir={delta.get('elixir')} dark={delta.get('dark_elixir')}"
@@ -432,11 +448,39 @@ def main() -> None:
                 "cycle": attack_count,
                 "duration_s": round(cycle_duration, 1),
                 "result": "completed",
-                "loot_seen": info.get("loot"),
+                "loot_seen": seen,
                 "delta": delta,
                 "res_before": info.get("res_before"),
                 "res_after": info.get("res_after"),
             })
+            for k in ("gold", "elixir", "dark_elixir"):
+                v = seen.get("dark" if k == "dark_elixir" else k)
+                if isinstance(v, int):
+                    digest_loot[k] += v
+                    session_loot[k] += v
+            cycle_score = loot_score(
+                seen.get("gold", 0), seen.get("elixir", 0), seen.get("dark", 0)
+            )
+            session_secs = max(time.time() - session_anchor, 1)
+            session_score = loot_score(**session_loot)
+            score_per_hr = int(session_score * 3600 / session_secs)
+            log.info(
+                f"  cycle score {cycle_score:,} | session {score_per_hr:,}/hr "
+                f"({session_score:,} over {session_secs/60:.0f} min)"
+            )
+            # Hourly digest, only if Telegram is configured.
+            if time.time() - digest_anchor >= 3600:
+                hour_score = loot_score(**digest_loot)
+                telegram.send(
+                    f"<b>last hour</b>: {attack_count} attacks, "
+                    f"score {hour_score:,} ({hour_score:,}/hr)\n"
+                    f"gold {digest_loot['gold']:,}, "
+                    f"elixir {digest_loot['elixir']:,}, "
+                    f"dark {digest_loot['dark_elixir']:,}\n"
+                    f"<i>session: {score_per_hr:,}/hr over {session_secs/60:.0f} min</i>"
+                )
+                digest_anchor = time.time()
+                digest_loot = {"gold": 0, "elixir": 0, "dark_elixir": 0}
         else:
             consecutive_failures += 1
             abort_reason = info.get("abort", "unknown")
@@ -451,6 +495,10 @@ def main() -> None:
             })
             if consecutive_failures >= 5:
                 log.warning("Too many failures — force-restarting CoC")
+                telegram.send(
+                    f"clash-farmer: 5 cycles failed in a row "
+                    f"(last reason: {abort_reason}). Restarting CoC."
+                )
                 adb.kill_coc()
                 time.sleep(2)
                 adb.launch_coc()
