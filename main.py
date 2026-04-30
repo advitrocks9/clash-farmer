@@ -621,16 +621,11 @@ def main() -> None:
         log.info(f"Resources: {resources}")
 
         # Planner reads CoC's JSON export via Settings → More → Copy Data,
-        # then `pbpaste` (BlueStacks mirrors Android clipboard to the host).
-        # Resource OCR is noisy enough that the storages-near-max gate is
-        # unreliable, so we also trigger on a 30-min timer.
-        time_for_planner = time.time() - last_planner_run > PLANNER_MIN_GAP_S
-        if time_for_planner or check_resources_near_max(resources, config):
-            try:
-                run_planner(adb, template_set, config)
-                last_planner_run = time.time()
-            except Exception as e:
-                log.error(f"planner failed, continuing farm: {e}")
+        # The Gemini-based planner is disabled — we now use the in-game
+        # Builder/Lab suggestion lists for upgrades, which is more reliable
+        # (no OCR of base state, no Gemini call, no layout.json dependency).
+        # Re-enable later if we want a smarter prioritization on top of the
+        # naive in-game suggestions.
 
         # Spend excess BEFORE attacking, so storages don't waste loot.
         # Strategy:

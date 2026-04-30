@@ -160,6 +160,9 @@ def upgrade_top_suggestion(
 
     adb.tap_precise(*CONFIRM_BTN)
     adb.wait_random(1.5, 2.5)
+    # Tap a safe area once after confirm to dismiss any post-confirm card
+    # so the next caller sees a clean HOME, not a building info panel.
+    _dismiss(adb)
     log.info(f"suggest[{kind}]: upgrade started")
     return True
 
@@ -193,5 +196,6 @@ def upgrade_pet_house(adb: ADB, template_set: dict[str, "tmpl.Template"]) -> boo
 
     adb.tap_precise(*CONFIRM_BTN)
     adb.wait_random(1.5, 2.5)
+    _dismiss(adb)
     log.info("pet_house: upgrade started")
     return True
