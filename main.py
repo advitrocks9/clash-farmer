@@ -155,7 +155,7 @@ def maxed_resources(resources: dict[str, int | None], config: dict) -> list[str]
     threshold = config["resources"].get("spend_threshold_pct", 0.95)
     storage = config["resources"]["storage_max"]
     out = []
-    for key in ("gold", "elixir"):
+    for key in ("gold", "elixir", "dark_elixir"):
         val = resources.get(key)
         if val is None:
             continue

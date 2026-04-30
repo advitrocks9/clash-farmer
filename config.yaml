@@ -25,11 +25,11 @@ resources:
   planner_trigger_pct: 0.90
   spend_threshold_pct: 0.95  # any resource at >= 95% of cap → spend before next attack
   storage_max:
-    # TH15 storages cap ~18M for gold/elixir, ~350K for dark.
-    # Set the bot's "max" to actual storage caps so spend triggers correctly.
-    gold: 18000000
-    elixir: 18000000
-    dark_elixir: 350000
+    # TH15 storages cap. Observed game shows dark holds 390K reliably with
+    # treasury, so set the trigger threshold close to that.
+    gold: 22000000
+    elixir: 22000000
+    dark_elixir: 390000
 
 delays:
   between_actions_ms: [200, 800]

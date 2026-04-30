@@ -69,10 +69,10 @@ def select_troop(adb: ADB, template_set: dict[str, tmpl.Template], troop_name: s
 
 
 def deploy_sneaky_goblins(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
-    # Zoom out so DEPLOY_EDGES land on the green strip outside the base.
-    adb.bluestacks_zoom_out(taps=6)
-    adb.wait_random(0.3, 0.6)
-
+    # CoC auto-zooms the battle camera when a troop is selected, so we don't
+    # need the manual osascript zoom here. Removing it eliminates the
+    # window-focus blip that fired on every cycle (BlueStacks briefly
+    # came to the foreground to receive UP-arrow keys).
     if not select_troop(adb, template_set, "sneaky_goblin"):
         log.warning("Could not find sneaky goblin in army bar — tapping first slot")
         # Slot 1 icon center is at (90, 670). x=40 hits the left screen edge
@@ -191,21 +191,50 @@ def monitor_battle(
 
 
 def _surrender(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
-    # End Battle red button location (battle view bottom-left).
-    adb.tap_precise(85, 540)
-    adb.wait_random(0.5, 1.0)
-    # The "Surrender?" confirm dialog has Okay (green) on the right.
-    btn_confirm = template_set.get("btn_confirm_surrender")
-    if btn_confirm:
-        frame = grab_frame_bgr(adb)
-        pos = tmpl.find(frame, btn_confirm)
-        if pos:
-            adb.tap(pos[0], pos[1])
-            adb.wait_random(1.0, 2.0)
-            return
-    # Fallback: tap the known Okay position.
-    adb.tap_precise(782, 412)
+    """Tap End Battle, then tap the green Okay on the surrender confirmation.
+
+    Detects Okay by colour (green pill in the dialog area y=370-460) rather
+    than relying on a saved template. Falls back to known coord (782, 412)
+    if colour detection fails.
+    """
+    # End Battle red button (verified position 2026-04-30).
+    adb.tap_precise(91, 538)
+    adb.wait_random(0.6, 1.2)
+
+    # Find the green Okay pill in the centre-right of the dialog.
+    frame = grab_frame_bgr(adb)
+    okay_pos = _find_dialog_okay(frame)
+    if okay_pos is None:
+        log.info("_surrender: no Okay button visible — using fallback (782, 412)")
+        okay_pos = (782, 412)
+    log.info(f"_surrender: tapping Okay at {okay_pos}")
+    adb.tap_precise(okay_pos[0], okay_pos[1])
     adb.wait_random(1.0, 2.0)
+
+
+def _find_dialog_okay(frame: np.ndarray) -> tuple[int, int] | None:
+    """Find the green Okay button in the surrender confirmation dialog.
+
+    The dialog overlays the battle view; Okay is the rightmost green pill
+    in y=370-460 (mid-screen). Returns (cx, cy) or None.
+    """
+    import cv2
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array([35, 150, 80]), np.array([75, 255, 255]))
+    mask[:370] = 0
+    mask[470:] = 0
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    btns = []
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        a = cv2.contourArea(c)
+        if a > 1500 and w > 80 and h > 30:
+            btns.append((x, y, w, h, a))
+    if not btns:
+        return None
+    btns.sort(key=lambda b: b[0])
+    x, y, w, h, _ = btns[-1]
+    return x + w // 2, y + h // 2
 
 
 def wait_for_result_screen(adb: ADB, template_set: dict[str, tmpl.Template], timeout: float = 15.0) -> bool:
