@@ -151,15 +151,18 @@ def check_resources_near_max(resources: dict[str, int | None], config: dict) -> 
 
 
 def maxed_resources(resources: dict[str, int | None], config: dict) -> list[str]:
-    """Return the resources at >= spend_threshold_pct of cap, valid OCR only."""
+    """Return the resources at >= spend_threshold_pct of cap.
+
+    The OCR clamp in screen.ocr already rejects digit-fragment garbage
+    (dark > 1.5M, gold/elixir > 50M → None). Anything that survives is
+    plausibly real, so we treat it as authoritative.
+    """
     threshold = config["resources"].get("spend_threshold_pct", 0.95)
     storage = config["resources"]["storage_max"]
     out = []
     for key in ("gold", "elixir", "dark_elixir"):
         val = resources.get(key)
         if val is None:
-            continue
-        if val > storage[key] * 4:  # OCR garbage
             continue
         if val >= storage[key] * threshold:
             out.append(key)

@@ -94,9 +94,12 @@ def _parse_resource_string(text: str) -> int | None:
 # and ~3M dark including treasury. EasyOCR occasionally concatenates digit groups
 # wrong and emits 9-12 digit numbers; clamp so callers don't see garbage.
 _MAX_PLAUSIBLE = {
-    "gold": 100_000_000,
-    "elixir": 100_000_000,
-    "dark_elixir": 10_000_000,
+    # Hard upper bounds for OCR sanity. Anything above is parser garbage —
+    # return None instead. TH15 storages cap below these even with the
+    # treasury bonus.
+    "gold": 50_000_000,
+    "elixir": 50_000_000,
+    "dark_elixir": 1_500_000,
     "loot": 10_000_000,
 }
 
