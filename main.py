@@ -77,6 +77,24 @@ def close_modal(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
             adb.wait_random(0.5, 1.0)
 
 
+CRASH_DIR = Path(__file__).resolve().parent / "local" / "crashes"
+
+
+def _save_crash_dump(adb: ADB, reason: str, info: dict) -> None:
+    # Save the failing frame + cycle info so the failure is debuggable
+    # post-mortem without having to reproduce live.
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        outdir = CRASH_DIR / f"{ts}_{reason}"
+        outdir.mkdir(parents=True, exist_ok=True)
+        frame_pil = adb.screencap()
+        frame_pil.save(outdir / "frame.png")
+        (outdir / "info.json").write_text(json.dumps(info, indent=2, default=str))
+        log.info(f"crash dump saved: {outdir.relative_to(CRASH_DIR.parent.parent)}")
+    except Exception as e:
+        log.warning(f"crash dump failed: {e}")
+
+
 def collect_resources(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
     collectors = ["collector_gold", "collector_elixir", "collector_dark_elixir"]
     for name in collectors:
@@ -226,6 +244,7 @@ def attack_cycle(
     info: dict = {"res_before": res_before}
 
     if not enter_matchmaking(adb, template_set):
+        _save_crash_dump(adb, "enter_matchmaking_failed", info)
         info["abort"] = "enter_matchmaking_failed"
         return False, info
 
@@ -238,6 +257,7 @@ def attack_cycle(
             adb.wait_random(0.8, 1.2)
             if state_detector.detect(grab_frame_bgr(adb)) == GameState.HOME:
                 break
+        _save_crash_dump(adb, "no_battle_state", info)
         info["abort"] = "no_battle_state"
         return False, info
 
@@ -270,31 +290,65 @@ def attack_cycle(
         adb.wait_random(1.5, 2.5)
 
     return_home(adb, template_set)
-    close_modal(adb, template_set)
 
-    # Post-attack reward animations chain 3-5 screens (chest closed → opens
-    # → reveal item → "Continue" → next chest). Use raw classify (not the
-    # smoothed StateDetector) to break out as soon as home is visible —
-    # otherwise the loop keeps tapping after we've returned and accidentally
-    # opens the Shop (1230, 700 = Shop icon on home).
-    from screen.state import classify, detect_signals
-    for i in range(24):
+    # State-aware return-home loop. The previous version blindly tapped
+    # (640,400) and (640,595) until HOME was detected — those coords land on
+    # Shop/Treasure/hotbar widgets once we're already on home, *creating*
+    # modals the next iter sees and prolonging the loop. Instead, dispatch
+    # by state: tap the actual return-home / close-X position when found,
+    # use BACK as the safe primitive when we don't know where we are.
+    from screen import templates as tmpl
+    from screen.state import RESULT_ROI, classify, detect_signals
+    btn_return_home = template_set.get("btn_return_home")
+    deadline = time.time() + 30.0
+    last_state = None
+    last_state_change = time.time()
+    unknown_taps = 0
+    while time.time() < deadline:
         frame = grab_frame_bgr(adb)
         sig = detect_signals(frame, template_set, threshold=0.70)
-        if classify(sig) == GameState.HOME:
+        state = classify(sig)
+        if state != last_state:
+            log.info(f"  return-home: {last_state} → {state}")
+            last_state = state
+            last_state_change = time.time()
+        if state == GameState.HOME:
             break
-        # Alternate chest/center, Continue, and BACK every few attempts —
-        # BACK closes Shop / Treasure / etc. that we accidentally opened.
-        if i % 4 == 3:
-            adb.back()
-        elif i % 2 == 0:
-            adb.tap(640, 400)
+        if state == GameState.MODAL:
+            pos = find_red_close_x(frame)
+            if pos:
+                adb.tap_precise(pos[0], pos[1])
+            else:
+                adb.back()
+        elif state == GameState.RESULT and btn_return_home is not None:
+            pos = tmpl.find(frame, btn_return_home, threshold=0.70, roi=RESULT_ROI)
+            if pos:
+                adb.tap_precise(pos[0], pos[1])
+            else:
+                adb.tap(640, 595)
         else:
-            adb.tap(640, 595)
-        time.sleep(0.4)
+            # UNKNOWN — likely chest reveal (no template for "Continue").
+            # First try BACK (closes Shop/Treasure if we accidentally opened
+            # one), then advance with a centre-upper tap that won't hit the
+            # bottom hotbar. Escalate after stalling >12s.
+            if unknown_taps % 2 == 0:
+                adb.back()
+            else:
+                adb.tap(640, 360)
+            unknown_taps += 1
+            if time.time() - last_state_change > 12.0:
+                log.warning(f"  return-home stalled in {state.name} for 12s — escalating BACK x3")
+                for _ in range(3):
+                    adb.back()
+                    time.sleep(0.5)
+                last_state_change = time.time()
+        time.sleep(0.5)
 
-    if not state_detector.wait_for(GameState.HOME, lambda: grab_frame_bgr(adb), timeout=25.0):
+    if state_detector.detect(grab_frame_bgr(adb)) != GameState.HOME and not state_detector.wait_for(
+        GameState.HOME, lambda: grab_frame_bgr(adb), timeout=8.0
+    ):
         log.error("Could not return to HOME after attack — needs CoC restart")
+        _save_crash_dump(adb, "no_home_after_battle", info)
         info["abort"] = "no_home_after_battle"
         return False, info
 
