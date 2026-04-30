@@ -109,8 +109,12 @@ def _suggestion_row_ys(frame: np.ndarray) -> list[int]:
     if other_y is None:
         other_y = 380
 
-    # Now find cost-icon rows in [suggest_y .. other_y]
-    band = frame[suggest_y:other_y, 670:720]
+    # Start scanning AFTER the 'Suggested upgrades:' header line itself —
+    # the header text sits at the suggest_y baseline, the first actual row
+    # begins ~22px below it.
+    scan_start = suggest_y + 22
+    scan_end = max(scan_start + 30, other_y - 5)
+    band = frame[scan_start:scan_end, 670:720]
     if band.size == 0:
         return []
     hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
@@ -119,10 +123,10 @@ def _suggestion_row_ys(frame: np.ndarray) -> list[int]:
     rows: list[int] = []
     last_y = -100
     for y, v in enumerate(proj):
-        if v > 100 and y - last_y > 18:
-            rows.append(y + suggest_y)
+        if v > 100 and y - last_y > 24:  # min 24px between rows (was 18, false positives)
+            rows.append(y + scan_start)
             last_y = y
-    log.info(f"suggestion rows: suggest_y={suggest_y} other_y={other_y} rows={rows}")
+    log.info(f"suggestion rows: header={suggest_y} scan={scan_start}-{scan_end} rows={rows}")
     return rows
 
 
@@ -280,67 +284,82 @@ def upgrade_top_suggestion(
         _dismiss(adb)
         return False
 
-    # Pick the first row whose cost matches `prefer_cost`. Else first row.
-    row_y = rows[0]
+    # Order rows by preference. If prefer_cost is given, dark-cost rows
+    # first when prefer_cost='dark', etc. Then fall through to others.
     if prefer_cost:
         row_costs = [(y, _row_cost_kind(frame, y)) for y in rows]
         log.info(f"suggest[{kind}]: rows={row_costs} prefer={prefer_cost}")
-        for y, c in row_costs:
-            if c == prefer_cost:
-                row_y = y
-                break
-        else:
-            log.info(f"suggest[{kind}]: no row with cost={prefer_cost}, taking first")
+        ordered = (
+            [y for y, c in row_costs if c == prefer_cost]
+            + [y for y, c in row_costs if c != prefer_cost]
+        )
+    else:
+        ordered = list(rows)
 
-    log.info(f"suggest[{kind}]: tapping suggestion row at y={row_y}")
-    adb.tap_precise(TOOLTIP_ROW_X, row_y)
-    adb.wait_random(2.0, 3.0)
+    # Try rows sequentially until one succeeds. Cap at 3 attempts so a
+    # broken card flow doesn't burn the whole cycle.
+    for attempt, row_y in enumerate(ordered[:3]):
+        log.info(f"suggest[{kind}]: attempt {attempt + 1} row y={row_y}")
+        adb.tap_precise(TOOLTIP_ROW_X, row_y)
+        adb.wait_random(2.0, 3.0)
 
-    frame = grab_frame_bgr(adb)
+        frame = grab_frame_bgr(adb)
+        safe, reason = _safe_to_upgrade(frame)
+        if not safe:
+            log.info(f"suggest[{kind}]: row {attempt + 1} not safe — {reason}")
+            _dismiss(adb)
+            # Reopen the tooltip for the next attempt.
+            if attempt + 1 < min(3, len(ordered)):
+                adb.tap_precise(*info_pos)
+                adb.wait_random(0.8, 1.4)
+            continue
 
-    # SAFETY GATE 1: building card text. Refuse to tap if it shows any
-    # gem-pay action (Boost / Finish / Cancel / Apprentice / Pets).
-    safe, reason = _safe_to_upgrade(frame)
-    if not safe:
-        log.warning(f"suggest[{kind}]: card not safe — {reason}")
+        upgrade_pos = _find_upgrade_button(frame)
+        if upgrade_pos is None:
+            log.info(f"suggest[{kind}]: row {attempt + 1} — no Upgrade button")
+            _dismiss(adb)
+            if attempt + 1 < min(3, len(ordered)):
+                adb.tap_precise(*info_pos)
+                adb.wait_random(0.8, 1.4)
+            continue
+
+        log.info(f"suggest[{kind}]: tapping Upgrade at {upgrade_pos}")
+        adb.tap_precise(*upgrade_pos)
+        adb.wait_random(1.0, 1.5)
+
+        frame = grab_frame_bgr(adb)
+        if not _confirm_button_visible(frame):
+            log.info(f"suggest[{kind}]: row {attempt + 1} — no confirm dialog")
+            x = find_red_close_x(frame, region=(1080, 0, 1280, 200))
+            if x:
+                adb.tap_precise(x[0], x[1])
+            _dismiss(adb)
+            if attempt + 1 < min(3, len(ordered)):
+                adb.tap_precise(*info_pos)
+                adb.wait_random(0.8, 1.4)
+            continue
+
+        safe_cost, cost_reason = _confirm_pays_resources_only(frame)
+        if not safe_cost:
+            log.error(f"suggest[{kind}]: REFUSING confirm — {cost_reason}")
+            x = find_red_close_x(frame, region=(1080, 0, 1280, 200))
+            if x:
+                adb.tap_precise(x[0], x[1])
+            _dismiss(adb)
+            if attempt + 1 < min(3, len(ordered)):
+                adb.tap_precise(*info_pos)
+                adb.wait_random(0.8, 1.4)
+            continue
+
+        log.info(f"suggest[{kind}]: confirm cost is resources ({cost_reason}) — proceeding")
+        adb.tap_precise(*CONFIRM_BTN)
+        adb.wait_random(1.5, 2.5)
         _dismiss(adb)
-        return False
+        log.info(f"suggest[{kind}]: upgrade started (row {attempt + 1})")
+        return True
 
-    upgrade_pos = _find_upgrade_button(frame)
-    if upgrade_pos is None:
-        log.warning(f"suggest[{kind}]: no Upgrade button on building card")
-        _dismiss(adb)
-        return False
-
-    log.info(f"suggest[{kind}]: tapping Upgrade at {upgrade_pos}")
-    adb.tap_precise(*upgrade_pos)
-    adb.wait_random(1.0, 1.5)
-
-    frame = grab_frame_bgr(adb)
-    if not _confirm_button_visible(frame):
-        log.warning(f"suggest[{kind}]: no Confirm dialog (insufficient resources?)")
-        x = find_red_close_x(frame, region=(1080, 0, 1280, 200))
-        if x:
-            adb.tap_precise(x[0], x[1])
-        _dismiss(adb)
-        return False
-
-    # SAFETY GATE 2: confirm cost icon. Refuse to confirm if cost is gems.
-    safe_cost, cost_reason = _confirm_pays_resources_only(frame)
-    if not safe_cost:
-        log.error(f"suggest[{kind}]: REFUSING confirm — {cost_reason}")
-        x = find_red_close_x(frame, region=(1080, 0, 1280, 200))
-        if x:
-            adb.tap_precise(x[0], x[1])
-        _dismiss(adb)
-        return False
-
-    log.info(f"suggest[{kind}]: confirm cost is resources ({cost_reason}) — proceeding")
-    adb.tap_precise(*CONFIRM_BTN)
-    adb.wait_random(1.5, 2.5)
-    _dismiss(adb)
-    log.info(f"suggest[{kind}]: upgrade started")
-    return True
+    log.info(f"suggest[{kind}]: exhausted {min(3, len(ordered))} rows without an upgrade")
+    return False
 
 
 PET_HOUSE_ICON_POS = (820, 17)
