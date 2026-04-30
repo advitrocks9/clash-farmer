@@ -13,26 +13,27 @@ from screen.ocr import get_roi, read_number
 log = logging.getLogger(__name__)
 
 DEPLOY_EDGES = {
-    # Zoomed-out battle view layout (1280x720):
-    #   y < 90      — top-edge green strip (deploy zone)
-    #   y 90-460    — base + opponent buildings + troops
-    #   y 460-540   — bottom-edge green strip (deploy zone)
-    #   y 500-580 x<200 — Surrender button (skip!)
-    #   y 620+      — army hotbar GUI (NEVER tap; deploys nothing
-    #                  and can re-select wrong troop)
-    #   x < 80, x > 1200, y 90-540 — side-edge green strips
-    "top":    [(x, y) for y in (15, 35, 55, 75) for x in range(120, 1160, 30)],
-    "bottom": [(x, y) for y in (475, 500, 525) for x in range(220, 1160, 30)],  # x>200 dodges Surrender
-    "left":   [(x, y) for x in (15, 35, 55, 75) for y in range(110, 540, 25)],
-    "right":  [(x, y) for x in (1205, 1225, 1245, 1265) for y in range(110, 540, 25)],
+    # Zoomed-out battle view layout (verified 2026-04-30 1280x720):
+    #   y 0-15       — top resource bar / coin display (skip)
+    #   y 15-90      — top-edge green strip (deploy)
+    #   y 90-455     — base + opponent buildings (red, no deploy)
+    #   y 455-505    — bottom-edge green strip (deploy)
+    #   y 510-580    — End Battle + Boost Army + Boost Heroes buttons
+    #   y 580-720    — Next button (right) + army hotbar (NEVER tap)
+    #   x 0-90       — extreme left edge (deploy)
+    #   x 1190-1280  — extreme right edge (deploy) — but x>1080 y<180 is top resource bar
+    "top":    [(x, y) for y in (15, 35, 55, 75) for x in range(120, 1080, 30)],
+    "bottom": [(x, y) for y in (465, 485, 505) for x in range(220, 1060, 30)],
+    "left":   [(x, y) for x in (15, 35, 55, 75) for y in range(110, 505, 25)],
+    "right":  [(x, y) for x in (1205, 1225, 1245, 1265) for y in range(110, 505, 25)],
 }
 
 # Hard mask — never tap inside these rectangles. Defence in depth on top of
 # the DEPLOY_EDGES layout so a future tweak can't accidentally hit the GUI.
 DEPLOY_KILL_ZONES = [
-    (0, 580, 1280, 720),    # army hotbar + bottom GUI
-    (0, 500, 200, 580),     # Surrender button
-    (1080, 0, 1280, 110),   # close-X / red banner top right
+    (0, 510, 1280, 720),    # ENTIRE bottom GUI band: End Battle / Boost / hotbar / Next
+    (1080, 0, 1280, 200),   # top-right resource bar + close-X
+    (0, 0, 200, 100),       # top-left player name + Available Loot
 ]
 
 
@@ -43,7 +44,18 @@ def _safe(x: int, y: int) -> bool:
     return True
 
 
+# Sneaky goblin lives in the leftmost troop slot at a fixed pixel position
+# on the rearranged base. Hardcoded — template-based detection was unreliable
+# because the slot's "selected" green outline and damage indicators changed
+# the cropped icon between frames.
+SNEAKY_GOBLIN_SLOT = (45, 665)
+
+
 def select_troop(adb: ADB, template_set: dict[str, tmpl.Template], troop_name: str) -> bool:
+    if troop_name == "sneaky_goblin":
+        adb.tap_precise(*SNEAKY_GOBLIN_SLOT)
+        adb.wait_random(0.2, 0.4)
+        return True
     frame = grab_frame_bgr(adb)
     t = template_set.get(f"troop_{troop_name}")
     if t is None:
