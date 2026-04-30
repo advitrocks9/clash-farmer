@@ -1,0 +1,19 @@
+[project]
+name = "clash-farmer"
+version = "2.0.0"
+description = "CoC home base farming bot with LLM-driven upgrade planning"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "google-genai",
+    "mss>=9.0",
+    "opencv-python",
+    "easyocr",
+    "pydantic",
+    "pyyaml",
+    "pillow",
+    "python-dotenv>=1.2.2",
+]
+
+[tool.ruff]
+line-length = 100

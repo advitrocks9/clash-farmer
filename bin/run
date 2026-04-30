@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# clash-farmer launcher: prereq checks → uv sync → run main.
+set -e
+
+cd "$(dirname "$0")/.."
+
+err() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+note() { printf '\033[36m·\033[0m %s\n' "$*"; }
+
+command -v uv >/dev/null || err "uv not installed: https://docs.astral.sh/uv/"
+command -v adb >/dev/null || err "adb not installed: brew install android-platform-tools"
+
+note "syncing python deps"
+uv sync --quiet
+
+note "scanning for BlueStacks ADB port"
+if ! adb devices 2>/dev/null | grep -q "127.0.0.1"; then
+  for port in 5555 5556 5565 5575 5585 5595; do
+    adb connect "127.0.0.1:$port" 2>/dev/null | grep -q connected && break
+  done
+fi
+adb devices | grep -q "127.0.0.1.*device" || err "no BlueStacks ADB device found. Enable ADB in BlueStacks → Settings → Advanced."
+
+if ! adb shell pidof com.supercell.clashofclans >/dev/null 2>&1; then
+  note "launching Clash of Clans"
+  adb shell monkey -p com.supercell.clashofclans -c android.intent.category.LAUNCHER 1 >/dev/null
+  sleep 15
+fi
+
+note "starting farming loop"
+exec uv run python main.py

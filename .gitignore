@@ -1,4 +1,24 @@
-.venv/
-.idea/
 __pycache__/
-debug/
+*.pyc
+.venv/
+.env
+.claude/
+*.egg-info/
+dist/
+build/
+.ruff_cache/
+
+# uv
+uv.lock
+
+# memory is local state
+memory/*.md
+!memory/.gitkeep
+
+# secrets
+config.local.yaml
+
+# local notes / runtime logs (not for public repo)
+.autonomy/
+.autonomy_local/
+local/

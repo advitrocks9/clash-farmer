@@ -1,0 +1,45 @@
+# Clash Farmer v2 — Configuration
+# Copy to config.local.yaml for secrets (gitignored)
+
+player:
+  tag: "#YOURTAG"
+  th_level: 15
+
+emulator:
+  type: "bluestacks_air"
+  resolution: [1280, 720]
+  dpi: 240
+  adb_port_range: [5554, 5600]  # scanned at startup
+
+farming:
+  army: "sneaky_goblins"
+  # NOTE: loot OCR is unreliable on this BlueStacks instance — set thresholds
+  # to 0 so the bot attacks the first base it sees. Re-tune once OCR is fixed.
+  min_gold: 0
+  min_elixir: 0
+  min_dark_elixir: 0
+  max_skips: 30
+  skip_threshold_decay: 0.8
+
+resources:
+  planner_trigger_pct: 0.90
+  spend_threshold_pct: 0.95  # any resource at >= 95% of cap → spend before next attack
+  storage_max:
+    # TH15 storages cap. Observed game shows dark holds 390K reliably with
+    # treasury, so set the trigger threshold close to that.
+    gold: 22000000
+    elixir: 22000000
+    dark_elixir: 390000
+
+delays:
+  between_actions_ms: [200, 800]
+  tap_jitter_px: 5
+  post_attack_wait_s: [3, 8]
+
+session:
+  break_interval_hours: 8
+  break_duration_min: [15, 30]
+
+gemini:
+  model: "gemini-3.1-pro"
+  temperature: 0.2
