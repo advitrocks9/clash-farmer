@@ -214,28 +214,20 @@ end tell
             raise RuntimeError("ADB screencap returned empty data")
         return Image.open(io.BytesIO(result.stdout))
 
-    # --- Clipboard (Clipper APK) ---
-    # Android 11+ restricts clipboard to foreground apps.
-    # Workaround: bring Clipper to foreground, broadcast, then kill it.
+    # --- Clipboard ---
+    # Android 11+ blocks background apps from reading the clipboard, so
+    # broadcast-based tools like ca.zgrs.clipper return result=0 on Android 13.
+    # BlueStacks Air mirrors Android's clipboard to the macOS clipboard, so we
+    # just read it from the host via `pbpaste` after CoC's "Copy Data" tap.
 
     def read_clipboard(self) -> str:
-        self._run("monkey -p org.rojekti.clipper -c android.intent.category.LAUNCHER 1")
-        time.sleep(0.5)
-        result = self._run("am broadcast -a clipper.get")
-        self._run("am force-stop org.rojekti.clipper")
-        return self._parse_clipper_result(result)
-
-    def _parse_clipper_result(self, result: str) -> str:
-        for line in result.splitlines():
-            line = line.strip()
-            if "data=" in line:
-                start = line.index('data="') + 6
-                end = line.rindex('"')
-                return line[start:end]
-        raise RuntimeError(f"Clipper returned unexpected output: {result}")
-
-    def read_clipboard_file(self, path: str = "/sdcard/clipboard.txt") -> str:
-        return self._run(f"cat {path}")
+        result = subprocess.run(
+            ["pbpaste"], capture_output=True, text=True, timeout=2
+        )
+        text = result.stdout
+        if not text:
+            raise RuntimeError("Mac clipboard empty (BlueStacks→host sync may be off)")
+        return text
 
     # --- App lifecycle ---
 

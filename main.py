@@ -131,26 +131,25 @@ def run_planner(adb: ADB, template_set: dict[str, tmpl.Template], config: dict) 
             adb.tap(pos[0], pos[1])
             adb.wait_random(1.0, 2.0)
 
-    # Scroll down and tap "Copy" in Data Export section
+    # Scroll down and tap the green Copy button next to "Export Village data".
     adb.swipe(640, 500, 640, 200, duration_ms=500)
     adb.wait_random(0.5, 1.0)
 
     frame = grab_frame_bgr(adb)
     btn_copy = template_set.get("btn_copy_data")
-    if btn_copy:
-        pos = tmpl.find(frame, btn_copy)
-        if pos:
-            adb.tap(pos[0], pos[1])
-            adb.wait_random(1.0, 1.5)
+    pos = tmpl.find(frame, btn_copy) if btn_copy else None
+    if pos is None:
+        # Fallback: known location of the Copy button when Data Export is on screen.
+        pos = (1130, 595)
+    adb.tap(pos[0], pos[1])
+    adb.wait_random(1.0, 1.5)
 
-    # Read clipboard via Clipper APK
     try:
         raw_json = adb.read_clipboard()
-    except RuntimeError:
-        log.error("Failed to read clipboard — skipping planner")
-        adb.back()
-        adb.wait_random(0.5, 1.0)
-        adb.back()
+    except RuntimeError as e:
+        log.error(f"Clipboard read failed — skipping planner ({e})")
+        adb.back(); adb.wait_random(0.5, 1.0)
+        adb.back(); adb.wait_random(0.5, 1.0)
         return
 
     # Close settings
@@ -434,12 +433,13 @@ def main() -> None:
         resources = read_resources(frame)
         log.info(f"Resources: {resources}")
 
-        # Planner trigger disabled until ca.zgrs.clipper is sideloaded.
-        # The org.rojekti.clipper variant doesn't expose `clipper.get`, so
-        # run_planner currently fails on read_clipboard and disrupts the
-        # state machine (settings panel left open).
-        if False and check_resources_near_max(resources, config):
-            run_planner(adb, template_set, config)
+        # Planner reads CoC's JSON export via Settings → More → Copy Data,
+        # then `pbpaste` (BlueStacks mirrors Android clipboard to the host).
+        if check_resources_near_max(resources, config):
+            try:
+                run_planner(adb, template_set, config)
+            except Exception as e:
+                log.error(f"planner failed, continuing farm: {e}")
 
         cycle_started_at = time.time()
         result, info = attack_cycle(adb, template_set, config, state_detector)
