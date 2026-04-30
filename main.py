@@ -19,8 +19,8 @@ RAID_LOG = Path(__file__).resolve().parent / "local" / "raid_log.jsonl"
 DARK_WEIGHT = 12
 
 
-def loot_score(gold: int = 0, elixir: int = 0, dark: int = 0) -> int:
-    return gold + elixir + dark * DARK_WEIGHT
+def loot_score(gold: int = 0, elixir: int = 0, dark_elixir: int = 0) -> int:
+    return gold + elixir + dark_elixir * DARK_WEIGHT
 
 
 def append_raid_log(entry: dict) -> None:
@@ -468,7 +468,7 @@ def main() -> None:
                     digest_loot[k] += v
                     session_loot[k] += v
             cycle_score = loot_score(
-                seen.get("gold", 0), seen.get("elixir", 0), seen.get("dark", 0)
+                seen.get("gold", 0), seen.get("elixir", 0), seen.get("dark", 0) or 0
             )
             session_secs = max(time.time() - session_anchor, 1)
             session_score = loot_score(**session_loot)
