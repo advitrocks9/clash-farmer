@@ -78,10 +78,15 @@ def detect_signals(
     template_set: dict[str, tmpl.Template],
     threshold: float = 0.70,
 ) -> StateSignals:
+    # Battle buttons (surrender/end-battle) score 0.65-1.0 on real battle
+    # frames depending on the button text/animation; home frames score ≤0.25
+    # at the same ROI. Use a lower threshold here so we don't lose battle
+    # detection mid-attack and falsely declare battle ended.
+    battle_threshold = min(0.6, threshold)
     return StateSignals(
         home_attack=_has(frame, template_set.get("btn_attack"), HOME_ROI, threshold),
-        battle_surrender=_has(frame, template_set.get("btn_surrender"), BATTLE_ROI, threshold),
-        battle_end=_has(frame, template_set.get("btn_end_battle"), BATTLE_ROI, threshold),
+        battle_surrender=_has(frame, template_set.get("btn_surrender"), BATTLE_ROI, battle_threshold),
+        battle_end=_has(frame, template_set.get("btn_end_battle"), BATTLE_ROI, battle_threshold),
         search_next=_has(frame, template_set.get("btn_next"), SEARCH_ROI, threshold),
         result_return=_has(frame, template_set.get("btn_return_home"), RESULT_ROI, threshold),
         modal_close_x=find_red_close_x(frame) is not None,

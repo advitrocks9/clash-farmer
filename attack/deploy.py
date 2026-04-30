@@ -119,10 +119,10 @@ def monitor_battle(
         # Battle has only really ended when NEITHER label is present at the
         # bottom-left button position.
         surrender_present = btn_surrender is not None and tmpl.exists(
-            frame, btn_surrender, threshold=0.7, roi=battle_btn_roi
+            frame, btn_surrender, threshold=0.6, roi=battle_btn_roi
         )
         end_battle_present = btn_end_battle is not None and tmpl.exists(
-            frame, btn_end_battle, threshold=0.7, roi=battle_btn_roi
+            frame, btn_end_battle, threshold=0.6, roi=battle_btn_roi
         )
         if (
             (btn_surrender is not None or btn_end_battle is not None)
