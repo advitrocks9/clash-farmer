@@ -49,20 +49,28 @@ CONFIRM_BTN = (897, 629)
 def _row_cost_kind(frame: np.ndarray, y: int) -> str:
     """Inspect the cost-icon hue at row y to determine 'gold'/'elixir'/
     'dark'/'unknown'. The icon sits at approximately (697, y).
+
+    Only positively detect gold (saturated yellow) and elixir (saturated
+    pink). Everything else with a small saturated signal is assumed
+    'dark' since dark elixir's icon is near-black with low saturation
+    (hard to mask reliably against the dark tooltip background).
     """
     # Sample a small box around the icon position
-    crop = frame[max(0, y - 12):y + 12, 685:715]
+    crop = frame[max(0, y - 10):y + 10, 685:715]
     if crop.size == 0:
         return "unknown"
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    gold   = int(cv2.inRange(hsv, np.array([20, 150, 150]), np.array([35, 255, 255])).sum() / 255)
-    elixir = int(cv2.inRange(hsv, np.array([140, 100, 100]), np.array([175, 255, 255])).sum() / 255)
-    dark   = int(cv2.inRange(hsv, np.array([110, 30, 20]), np.array([140, 200, 110])).sum() / 255)
-    counts = {"gold": gold, "elixir": elixir, "dark": dark}
-    best = max(counts, key=counts.get)
-    if counts[best] < 8:
-        return "unknown"
-    return best
+    # Gold coin: bright saturated yellow.
+    gold   = int(cv2.inRange(hsv, np.array([22, 180, 180]), np.array([35, 255, 255])).sum() / 255)
+    # Elixir drop: bright saturated pink/magenta — opencv hue ~150-175.
+    elixir = int(cv2.inRange(hsv, np.array([150, 150, 150]), np.array([175, 255, 255])).sum() / 255)
+    # Dark elixir is nearly black so masks aren't reliable; we infer it
+    # from absence of gold and elixir rather than positive detection.
+    if gold > 15 and gold > elixir:
+        return "gold"
+    if elixir > 15 and elixir > gold:
+        return "elixir"
+    return "dark"
 
 
 def _suggestion_row_ys(frame: np.ndarray) -> list[int]:
