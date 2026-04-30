@@ -123,9 +123,14 @@ def _suggestion_row_ys(frame: np.ndarray) -> list[int]:
     rows: list[int] = []
     last_y = -100
     for y, v in enumerate(proj):
-        if v > 100 and y - last_y > 24:  # min 24px between rows (was 18, false positives)
+        if v > 100 and y - last_y > 24:  # min 24px between rows
             rows.append(y + scan_start)
             last_y = y
+    # The 'Suggested upgrades:' section in CoC's tooltip caps at 3 rows
+    # before the 'Other upgrades:' divider. OCR sometimes misses the
+    # divider header (small text), so we hard-cap the row list at 3
+    # to avoid leaking into the Other section.
+    rows = rows[:3]
     log.info(f"suggestion rows: header={suggest_y} scan={scan_start}-{scan_end} rows={rows}")
     return rows
 
@@ -218,6 +223,25 @@ def _confirm_button_visible(frame: np.ndarray) -> bool:
     mask = cv2.inRange(hsv, np.array([35, 150, 80]), np.array([75, 255, 255]))
     region = mask[600:680, 800:1000]
     return int(region.sum()) > 5000
+
+
+def _confirm_cost_kind(frame: np.ndarray) -> str:
+    """Return 'gold' / 'elixir' / 'dark' / 'gem' / 'unknown' for the
+    cost icon next to the Confirm pill (920-1000, 615-660). Used to
+    skip rows whose cost doesn't match the maxed resource."""
+    region = frame[615:660, 920:1000]
+    hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    gold   = int(cv2.inRange(hsv, np.array([20, 150, 150]), np.array([35, 255, 255])).sum() / 255)
+    elixir = int(cv2.inRange(hsv, np.array([140, 100, 100]), np.array([175, 255, 255])).sum() / 255)
+    dark   = int(cv2.inRange(hsv, np.array([110, 30, 20]), np.array([140, 200, 110])).sum() / 255)
+    gem    = int(cv2.inRange(hsv, np.array([85, 100, 100]), np.array([110, 255, 255])).sum() / 255)
+    if gem > 10:
+        return "gem"
+    counts = {"gold": gold, "elixir": elixir, "dark": dark}
+    best = max(counts, key=counts.get)
+    if counts[best] < 50:
+        return "unknown"
+    return best
 
 
 def _confirm_pays_resources_only(frame: np.ndarray) -> tuple[bool, str]:
@@ -350,6 +374,25 @@ def upgrade_top_suggestion(
                 adb.tap_precise(*info_pos)
                 adb.wait_random(0.8, 1.4)
             continue
+
+        # If the caller wanted a specific cost type (e.g. dark when dark
+        # is maxed), and this dialog's cost doesn't match, abort and try
+        # the next row. Better than spending the wrong resource.
+        if prefer_cost:
+            actual_cost = _confirm_cost_kind(frame)
+            if actual_cost != prefer_cost and actual_cost in ("gold", "elixir", "dark"):
+                log.info(
+                    f"suggest[{kind}]: row {attempt + 1} cost={actual_cost}, "
+                    f"want={prefer_cost} — closing and trying next"
+                )
+                x = find_red_close_x(frame, region=(1080, 0, 1280, 200))
+                if x:
+                    adb.tap_precise(x[0], x[1])
+                _dismiss(adb)
+                if attempt + 1 < min(3, len(ordered)):
+                    adb.tap_precise(*info_pos)
+                    adb.wait_random(0.8, 1.4)
+                continue
 
         log.info(f"suggest[{kind}]: confirm cost is resources ({cost_reason}) — proceeding")
         adb.tap_precise(*CONFIRM_BTN)
