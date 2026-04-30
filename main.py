@@ -82,6 +82,14 @@ def close_modal(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
 CRASH_DIR = Path(__file__).resolve().parent / "local" / "crashes"
 
 
+def _close_settings(adb: ADB) -> None:
+    """Close the Settings dialog stack via the red X (1240, 50) — never via
+    BACK, because BACK from home triggers a 'Confirm Exit' dialog."""
+    for _ in range(2):
+        adb.tap_precise(1240, 50)
+        adb.wait_random(0.6, 1.2)
+
+
 def _connection_lost_popup(frame) -> bool:
     """Detect the dark-grey 'Connection lost' popup overlay.
 
@@ -160,64 +168,37 @@ def maxed_resources(resources: dict[str, int | None], config: dict) -> list[str]
 def run_planner(adb: ADB, template_set: dict[str, tmpl.Template], config: dict) -> None:
     log.info("Resources near max — running planner")
 
-    # Navigate to settings and export base state
-    frame = grab_frame_bgr(adb)
-    btn_settings = template_set.get("btn_settings_gear")
-    if not btn_settings:
-        log.error("No settings gear template")
-        return
-
-    pos = tmpl.find(frame, btn_settings)
-    if not pos:
-        log.warning("Settings button not found")
-        return
-
-    adb.tap(pos[0], pos[1])
-    adb.wait_random(1.0, 2.0)
-
-    # Tap "More Settings"
-    frame = grab_frame_bgr(adb)
-    btn_more = template_set.get("btn_more_settings")
-    if btn_more:
-        pos = tmpl.find(frame, btn_more)
-        if pos:
-            adb.tap(pos[0], pos[1])
-            adb.wait_random(1.0, 2.0)
-
-    # Scroll down and tap the green Copy button next to "Export Village data".
-    adb.swipe(640, 500, 640, 200, duration_ms=500)
-    adb.wait_random(0.5, 1.0)
-
-    frame = grab_frame_bgr(adb)
-    btn_copy = template_set.get("btn_copy_data")
-    pos = tmpl.find(frame, btn_copy) if btn_copy else None
-    if pos is None:
-        # Fallback: known location of the Copy button when Data Export is on screen.
-        pos = (1130, 595)
-    # Empty the macOS clipboard first so we can tell whether the Copy actually
-    # landed (otherwise pbpaste returns whatever the user had copied earlier).
+    # Verified flow on 2026-04-30:
+    # 1. Tap Settings gear (1235, 525)
+    # 2. Tap "More Settings" (620, 620) inside the Settings dialog
+    # 3. Scroll down twice to reveal the Data Export row
+    # 4. Tap green Copy button at (905, 444) → JSON written to Android
+    #    clipboard which BlueStacks Air mirrors to macOS pbpaste
+    # 5. Close X (1240, 50) twice to return to home — never use BACK,
+    #    BACK from home opens the "Confirm Exit" quit dialog
     adb.clear_clipboard()
-    adb.tap(pos[0], pos[1])
-    adb.wait_random(1.0, 1.5)
+    adb.tap_precise(1235, 525)
+    adb.wait_random(1.5, 2.5)
+    adb.tap_precise(620, 620)
+    adb.wait_random(1.5, 2.5)
+    for _ in range(2):
+        adb.swipe(640, 500, 640, 200, duration_ms=600)
+        adb.wait_random(0.5, 1.0)
+    adb.tap_precise(905, 444)
+    adb.wait_random(1.0, 1.8)
 
     try:
         raw_json = adb.read_clipboard()
     except RuntimeError as e:
         log.error(f"Clipboard read failed — skipping planner ({e})")
-        adb.back(); adb.wait_random(0.5, 1.0)
-        adb.back(); adb.wait_random(0.5, 1.0)
+        _close_settings(adb)
         return
     if not raw_json.lstrip().startswith("{"):
-        log.error("Clipboard does not contain JSON — Copy Data tap probably missed")
-        adb.back(); adb.wait_random(0.5, 1.0)
-        adb.back(); adb.wait_random(0.5, 1.0)
+        log.error("Clipboard does not contain JSON — Copy tap missed")
+        _close_settings(adb)
         return
 
-    # Close settings
-    adb.back()
-    adb.wait_random(0.5, 1.0)
-    adb.back()
-    adb.wait_random(0.5, 1.0)
+    _close_settings(adb)
 
     try:
         base_state = parse_export(raw_json)

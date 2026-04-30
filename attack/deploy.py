@@ -13,15 +13,34 @@ from screen.ocr import get_roi, read_number
 log = logging.getLogger(__name__)
 
 DEPLOY_EDGES = {
-    # Zoomed-out battle view — base shrinks, exposing a wide green band on
-    # all four edges. Sweep multiple rows/columns densely so most positions
-    # land in the deploy zone. Only ~16% of single-row taps were valid; this
-    # version doubles the coverage on each edge.
-    "top": [(x, y) for y in (15, 35, 55, 75) for x in range(80, 1200, 30)],
-    "bottom": [(x, y) for y in (565, 590, 605) for x in range(80, 1200, 30)],
-    "left": [(x, y) for x in (15, 35, 55, 75) for y in range(95, 575, 25)],
-    "right": [(x, y) for x in (1205, 1225, 1245, 1265) for y in range(95, 575, 25)],
+    # Zoomed-out battle view layout (1280x720):
+    #   y < 90      — top-edge green strip (deploy zone)
+    #   y 90-460    — base + opponent buildings + troops
+    #   y 460-540   — bottom-edge green strip (deploy zone)
+    #   y 500-580 x<200 — Surrender button (skip!)
+    #   y 620+      — army hotbar GUI (NEVER tap; deploys nothing
+    #                  and can re-select wrong troop)
+    #   x < 80, x > 1200, y 90-540 — side-edge green strips
+    "top":    [(x, y) for y in (15, 35, 55, 75) for x in range(120, 1160, 30)],
+    "bottom": [(x, y) for y in (475, 500, 525) for x in range(220, 1160, 30)],  # x>200 dodges Surrender
+    "left":   [(x, y) for x in (15, 35, 55, 75) for y in range(110, 540, 25)],
+    "right":  [(x, y) for x in (1205, 1225, 1245, 1265) for y in range(110, 540, 25)],
 }
+
+# Hard mask — never tap inside these rectangles. Defence in depth on top of
+# the DEPLOY_EDGES layout so a future tweak can't accidentally hit the GUI.
+DEPLOY_KILL_ZONES = [
+    (0, 580, 1280, 720),    # army hotbar + bottom GUI
+    (0, 500, 200, 580),     # Surrender button
+    (1080, 0, 1280, 110),   # close-X / red banner top right
+]
+
+
+def _safe(x: int, y: int) -> bool:
+    for kx1, ky1, kx2, ky2 in DEPLOY_KILL_ZONES:
+        if kx1 <= x <= kx2 and ky1 <= y <= ky2:
+            return False
+    return True
 
 
 def select_troop(adb: ADB, template_set: dict[str, tmpl.Template], troop_name: str) -> bool:
@@ -53,9 +72,12 @@ def deploy_sneaky_goblins(adb: ADB, template_set: dict[str, tmpl.Template]) -> N
     all_points: list[tuple[int, int]] = []
     for edge_name in ("top", "bottom", "left", "right"):
         all_points.extend(DEPLOY_EDGES[edge_name])
-    adb.tap_burst(all_points, gap_ms=20)
+    safe_points = [(x, y) for x, y in all_points if _safe(x, y)]
+    skipped = len(all_points) - len(safe_points)
+    adb.tap_burst(safe_points, gap_ms=20)
 
-    log.info(f"Issued {len(all_points)} sneaky goblin deploy taps across all edges")
+    log.info(f"Issued {len(safe_points)} sneaky goblin deploy taps "
+             f"({skipped} masked out of GUI kill-zones)")
 
 
 def deploy_heroes(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
@@ -84,14 +106,15 @@ def deploy_heroes(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
 def monitor_battle(
     adb: ADB,
     template_set: dict[str, tmpl.Template],
-    max_battle_seconds: float = 120.0,
+    max_battle_seconds: float = 90.0,
 ) -> None:
     """Wait until battle ends or loot plateaus, whichever comes first.
 
-    Three exit signals, polled every second:
+    Exit signals (polled every second):
     - btn_return_home anywhere on screen → battle ended naturally
-    - btn_surrender absent → battle ended (we missed return_home detection)
-    - loot_gained OCR plateaus for 3 reads → surrender to save time
+    - both surrender + end-battle absent → battle ended naturally
+    - loot_gained OCR plateaus for 2 reads → surrender to save time
+    - max_battle_seconds elapsed → surrender (hard stop)
     """
     btn_return = template_set.get("btn_return_home")
     btn_surrender = template_set.get("btn_surrender")
@@ -99,7 +122,7 @@ def monitor_battle(
 
     last_loot: int | None = None
     plateau_count = 0
-    max_plateau = 3
+    max_plateau = 2  # was 3 — faster surrender on stalled raids
     check_interval = 1.0
     started_at = time.time()
     battle_btn_roi = (0, 500, 200, 580)
@@ -134,10 +157,15 @@ def monitor_battle(
             return
 
         current_loot = read_number(frame, get_roi("loot_gained"))
-        if current_loot is not None and last_loot is not None:
-            if current_loot <= last_loot:
+        # Treat OCR misses (None) as plateau ticks too — when troops are
+        # idle and not generating new loot the OCR often can't lock onto
+        # the static loot bar either, so a None should still count toward
+        # surrender rather than resetting the plateau counter.
+        if last_loot is not None:
+            if current_loot is None or current_loot <= last_loot:
                 plateau_count += 1
-                log.info(f"Loot plateaued ({plateau_count}/{max_plateau}): {current_loot:,}")
+                log.info(f"Loot plateaued ({plateau_count}/{max_plateau}): "
+                         f"{current_loot if current_loot is not None else 'OCR-miss'}")
             else:
                 plateau_count = 0
         if current_loot is not None:
