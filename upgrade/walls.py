@@ -47,7 +47,10 @@ def try_wall_upgrade(
     kind: Literal["gold", "elixir"],
     max_attempts: int = 3,
 ) -> bool:
-    """Try to upgrade a wall using `kind` resource. Returns True on success."""
+    """Try ONE wall upgrade using `kind` resource. Returns True on success.
+
+    For multi-wall spending, see `spend_into_walls`.
+    """
     upgrade_pos = UPGRADE_BTN_GOLD if kind == "gold" else UPGRADE_BTN_ELIXIR
 
     for attempt in range(max_attempts):
@@ -98,6 +101,49 @@ def _confirm_button_visible(frame) -> bool:
     mask = cv2.inRange(hsv, np.array([35, 150, 80]), np.array([75, 255, 255]))
     region = mask[600:680, 800:1000]
     return int(region.sum()) > 5000
+
+
+def spend_into_walls(
+    adb: ADB,
+    template_set: dict[str, "tmpl.Template"],
+    kind: Literal["gold", "elixir"],
+    config: dict,
+    max_walls: int = 8,
+) -> int:
+    """Loop wall upgrades until storage drops below threshold or N walls done.
+
+    Each successful wall absorbs 3M-5M of `kind`. After each upgrade we
+    re-read resources and stop early if the storage is no longer near max
+    (so we keep some buffer for upcoming attacks).
+
+    Returns the count of walls actually upgraded.
+    """
+    from screen.capture import grab_frame_bgr
+    from screen.ocr import read_resources
+
+    threshold = config["resources"].get("spend_threshold_pct", 0.95)
+    storage = config["resources"]["storage_max"]
+    cap = storage.get(kind, 0)
+    if cap == 0:
+        return 0
+
+    upgraded = 0
+    for i in range(max_walls):
+        ok = try_wall_upgrade(adb, template_set, kind=kind)
+        if not ok:
+            log.info(f"spend_into_walls[{kind}]: upgrade {i + 1}/{max_walls} failed — stopping")
+            break
+        upgraded += 1
+        # Re-check storage. If storage dropped below threshold, leave a
+        # buffer for attacks instead of dumping it all into walls.
+        adb.wait_random(0.5, 1.0)
+        frame = grab_frame_bgr(adb)
+        cur = read_resources(frame)
+        val = cur.get(kind)
+        if val is not None and val < cap * threshold:
+            log.info(f"spend_into_walls[{kind}]: dropped to {val:,} < {cap * threshold:,.0f} — done ({upgraded} walls)")
+            break
+    return upgraded
 
 
 def dismiss_card(adb: ADB) -> None:

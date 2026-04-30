@@ -642,26 +642,36 @@ def main() -> None:
         for kind in maxed_resources(resources, config):
             log.info(f"resource {kind} maxed — running spend flow")
             try:
-                ok = False
-                # 1. Builder suggestion (only if we'd still have ≥1 free).
+                actions: list[str] = []
+                # 1. ONE builder suggestion if we can still afford to consume
+                #    a builder slot. Skipped if free_builders < 2 so wall
+                #    fallback never gets blocked.
                 if free_builders is not None and free_builders >= 2:
-                    ok = suggest.upgrade_top_suggestion(adb, template_set, kind="builder")
-                # 2. Lab suggestion for elixir/dark — lab is independent of
-                #    builder slots, so always try when an elixir/dark surplus.
-                if not ok and kind in ("elixir", "dark_elixir"):
-                    ok = suggest.upgrade_top_suggestion(adb, template_set, kind="lab")
-                # 3. Pet House (own slot, no builder consumed for short upgrades).
-                if not ok and kind == "elixir":
-                    ok = suggest.upgrade_pet_house(adb, template_set)
-                # 4. Wall — instant, no builder lock. Always available.
-                if not ok:
-                    ok = walls.try_wall_upgrade(adb, template_set, kind=kind)
-                if ok:
-                    telegram.send(f"🛠 spent excess {kind}", silent=True)
-                    metrics.log_event("spend", resource=kind, success=True)
+                    if suggest.upgrade_top_suggestion(adb, template_set, kind="builder"):
+                        actions.append("builder")
+                # 2. ONE lab suggestion (lab queue independent of builders).
+                if kind in ("elixir", "dark_elixir"):
+                    if suggest.upgrade_top_suggestion(adb, template_set, kind="lab"):
+                        actions.append("lab")
+                # 3. ONE pet-house attempt for elixir.
+                if kind == "elixir":
+                    if suggest.upgrade_pet_house(adb, template_set):
+                        actions.append("pet_house")
+                # 4. WALLS — multi-upgrade loop. Walls absorb gold/elixir
+                #    instantly with no builder lock; spend until storage
+                #    drops below the trigger threshold (or 8-wall cap).
+                #    Dark elixir can't go into walls.
+                if kind in ("gold", "elixir"):
+                    n = walls.spend_into_walls(adb, template_set, kind=kind, config=config)
+                    if n > 0:
+                        actions.append(f"{n} walls")
+                if actions:
+                    msg = f"🛠 spent excess {kind}: {', '.join(actions)}"
+                    telegram.send(msg, silent=True)
+                    metrics.log_event("spend", resource=kind, actions=actions)
                 else:
                     telegram.send(f"⚠️ {kind} maxed but no upgrade available", silent=True)
-                    metrics.log_event("spend", resource=kind, success=False)
+                    metrics.log_event("spend", resource=kind, actions=[])
             except Exception as e:
                 log.error(f"spend flow failed: {e}")
                 metrics.log_event("spend_error", resource=kind, error=str(e))

@@ -89,9 +89,24 @@ def _read_card_text(frame: np.ndarray) -> str:
     return " ".join(results).lower() if results else ""
 
 
-# Words on a building card that mean tapping a button SPENDS GEMS.
-# If any of these appear, abort the upgrade flow entirely.
-GEM_BUTTON_WORDS = ("boost", "finish", "cancel", "apprentice", "pets")
+# Words on a building card that mean tapping a button SPENDS GEMS or
+# does something we don't want. If ANY of these appear, abort entirely.
+# - 'ready' / 'work'   → Builder's Apprentice card ("Ready to work!")
+# - 'boost' / 'finish' → gem-cost time-skip buttons
+# - 'cancel'           → cancels an in-progress upgrade (we don't want this)
+# - 'apprentice'       → Assign Apprentice (gem cost)
+# - 'pets'             → Pet House sub-menu (different card structure)
+# - 'recogn' / 'assign'→ Builder's Apprentice "Recognize Builder's Hut" header
+GEM_BUTTON_WORDS = (
+    "boost", "finish", "cancel", "apprentice", "pets",
+    "ready to", "recogn", "assign",
+)
+
+# OCR variations of "Upgrade" — we accept any of these. EasyOCR commonly
+# returns '@pgrade' / 'upykade' / 'upgkade' due to the cartoon font.
+# A clean wall card has 'Upgrade More' + 3× 'Upgrade' so 'grade' should
+# appear at least twice.
+UPGRADE_PATTERNS = ("upgrade", "@pgrade", "upykade", "upgkade", "@grade")
 
 
 def _safe_to_upgrade(frame: np.ndarray) -> tuple[bool, str]:
@@ -101,9 +116,9 @@ def _safe_to_upgrade(frame: np.ndarray) -> tuple[bool, str]:
         return False, "no_text"
     for word in GEM_BUTTON_WORDS:
         if word in text:
-            return False, f"refused (gem button '{word}' on card): {text!r}"
-    if "upgrade" not in text:
-        return False, f"no Upgrade text on card: {text!r}"
+            return False, f"refused (gem/wrong button '{word}' on card): {text!r}"
+    if not any(p in text for p in UPGRADE_PATTERNS):
+        return False, f"no Upgrade pattern on card: {text!r}"
     return True, text
 
 
@@ -145,16 +160,14 @@ def _confirm_button_visible(frame: np.ndarray) -> bool:
 
 
 def _confirm_pays_resources_only(frame: np.ndarray) -> tuple[bool, str]:
-    """SAFETY GATE for the upgrade Confirm dialog.
+    """SAFETY GATE 2 for the upgrade Confirm dialog.
 
-    The dialog has a green Confirm pill at the bottom-right showing the
-    cost as 'NUMBER + ICON'. If the icon is a gem (pink/cyan diamond)
-    rather than gold/elixir/dark, abort.
+    The dialog's green Confirm pill shows 'NUMBER + ICON' for the cost.
+    We REQUIRE the icon to be gold (yellow) / elixir (pink) / dark (dark
+    purple). Anything else (gems, magic items, training potions) → abort.
 
-    We detect by colour band of pixels next to the cost text in the
-    dialog. Gold dominates yellow ~25°. Elixir dominates pink ~310°.
-    Dark dominates near-black saturated purple. Gems dominate cyan
-    ~180° (with a strong saturation that beats elixir's pink).
+    Per user instruction: only allow if gold/elixir/dark symbols are
+    present. No exceptions.
 
     Returns (safe, reason).
     """
@@ -162,9 +175,7 @@ def _confirm_pays_resources_only(frame: np.ndarray) -> tuple[bool, str]:
     # roughly (940-990, 615-650) in the upgrade dialog.
     region = frame[615:660, 920:1000]
     hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
 
-    # Resource hue masks
     gold_px   = int(cv2.inRange(hsv, np.array([20, 150, 150]), np.array([35, 255, 255])).sum() / 255)
     elixir_px = int(cv2.inRange(hsv, np.array([140, 100, 100]), np.array([175, 255, 255])).sum() / 255)
     dark_px   = int(cv2.inRange(hsv, np.array([110, 30, 20]), np.array([140, 200, 110])).sum() / 255)
@@ -172,10 +183,14 @@ def _confirm_pays_resources_only(frame: np.ndarray) -> tuple[bool, str]:
 
     counts = {"gold": gold_px, "elixir": elixir_px, "dark": dark_px, "gem": gem_px}
     log.info(f"confirm-cost icon counts: {counts}")
-    if gem_px > max(gold_px, elixir_px, dark_px) and gem_px > 30:
-        return False, f"gem cost detected (gem={gem_px}, others={counts})"
-    if max(gold_px, elixir_px, dark_px) < 30:
-        return False, f"no resource icon detected ({counts})"
+
+    # Hard reject: any gem signal at all.
+    if gem_px > 10:
+        return False, f"GEM ICON DETECTED — refusing ({counts})"
+    # Hard require: a confident gold/elixir/dark signal.
+    best_resource = max(gold_px, elixir_px, dark_px)
+    if best_resource < 100:
+        return False, f"no clear gold/elixir/dark icon ({counts})"
     return True, f"resource cost ({counts})"
 
 
