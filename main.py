@@ -1,372 +1,454 @@
-import re
-import time
-import threading
-import os
+from __future__ import annotations
+
+import json
+import logging
 import random
-import numpy as np
-import cv2 as cv
-import easyocr
-from mss import mss
-from makcu import create_controller as createController, MouseButton
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 
-# ---------- constants ----------
+import yaml
+from dotenv import load_dotenv
 
-os.makedirs('debug', exist_ok=True)
+load_dotenv(Path(__file__).resolve().parent / ".env")
+RAID_LOG = Path(__file__).resolve().parent / "local" / "raid_log.jsonl"
 
-SLEEP_VERY_SHORT = (0.02, 0.04)
-SLEEP_SHORT = (0.05, 0.20)
-SLEEP_MEDIUM = (0.20, 0.80)
-SLEEP_LONG = (0.80, 2.00)
 
-coords = {
-    "elixir": (1621, 129, 1810, 180),
-    "gold": (1621, 50, 1810, 101),
-    "trophies": (213, 138, 300, 201),
-    "attack": (141, 859, 279, 997),
-    "damage": (864, 428, 1133, 521),
-    "attack_trophies": (1097, 683, 1379, 745),
-    "return_home": (876, 817, 1121, 919),
-    "start_end": (918, 38, 1082, 74),
-    "error": (804, 296, 1208, 335),
-    "ultimate": (417, 824, 456, 851),
-    "find_match": (1259, 630, 1595, 738),
-    "exit_button": (1565, 102, 1619, 159),
-    "collect_elixer": (1310, 829, 1517, 910),
-    "check_builder_base": (1079, 53, 1169, 101),
-    "check_home_base": (985, 60, 1054, 96),
-    "center": (971, 408, 1160, 567),
-    "troop_deploy": np.array([[152, 553], [863, 41], [1015, 41], [1682, 553], [1318, 843], [480, 839], [479, 798]]),
-    "enemy_base": np.array([[525, 522], [917, 241], [1370, 559], [972, 841], [811, 837]]),
-    "boosts": np.array([[130, 739], [820, 739], [817, 819], [131, 819]])
-}
+def append_raid_log(entry: dict) -> None:
+    RAID_LOG.parent.mkdir(parents=True, exist_ok=True)
+    entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+    with open(RAID_LOG, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
-resources = {
-    "dark_elixer": "images/dark_elixer.png",
-    "gold": "images/gold.png",
-    "elixer": "images/elixer.png",
-    "builder_elixer": "images/builder_elixer.png",
-    "builder_gold": "images/builder_gold.png",
-    "builder_gems": "images/builder_gems.png",
-    "builder_reward": "images/builder_reward.png"
-}
+from attack.deploy import (
+    deploy_heroes,
+    deploy_sneaky_goblins,
+    monitor_battle,
+    return_home,
+    wait_for_result_screen,
+)
+from attack.search import LootThresholds, end_battle_warmup, enter_matchmaking, search_loop
+from input.adb import ADB, ADBConfig
+from planner.export import parse_export, state_to_planner_json
+from planner.gemini import plan
+from screen import templates as tmpl
+from screen.capture import grab_frame_bgr
+from screen.ocr import read_resources
+from screen.state import GameState, StateDetector, find_red_close_x
+from upgrade.execute import execute_hero_upgrade, execute_upgrade
 
-lowerRed1 = np.array([0, 100, 100])
-upperRed1 = np.array([10, 255, 255])
-lowerRed2 = np.array([160, 100, 100])
-upperRed2 = np.array([179, 255, 255])
+log = logging.getLogger("clash-farmer")
 
-# ---------- globals ----------
+CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
+LOCAL_CONFIG_PATH = Path(__file__).resolve().parent / "config.local.yaml"
 
-latestFrame = None
-mouse = None
-reader = None
-statsPrev = None
-totalElixirGain = 0
-totalGoldGain = 0
-attackCount = 0
-attackStateLast = None
 
-# ---------- helper ----------
+def load_config() -> dict:
+    path = LOCAL_CONFIG_PATH if LOCAL_CONFIG_PATH.exists() else CONFIG_PATH
+    return yaml.safe_load(path.read_text())
 
-def randomSleep(low, high):
-    time.sleep(random.uniform(low, high))
 
-def captureLoop():
-    global latestFrame
-    with mss() as sct:
-        monitor = sct.monitors[1]
-        while True:
-            sctImg = sct.grab(monitor)
-            latestFrame = np.array(sctImg)[:, :, :3]
-            time.sleep(0.025)
+def setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
-def getLatestFrame():
-    return None if latestFrame is None else latestFrame.copy()
 
-def initOcrReader():
-    global reader
-    reader = easyocr.Reader(['en'])
+def close_modal(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
+    frame = grab_frame_bgr(adb)
+    btn = template_set.get("btn_close_modal")
+    if btn:
+        pos = tmpl.find(frame, btn)
+        if pos:
+            adb.tap(pos[0], pos[1])
+            adb.wait_random(0.5, 1.0)
 
-threading.Thread(target=initOcrReader, daemon=True).start()
 
-# ---------- vision ----------
-
-def ocrRegion(region, debug=False):
-    while reader is None:
-        time.sleep(0.05)
-    frame = getLatestFrame()
-    if frame is None:
-        return ''
-    l, t, r, b = region
-    cropped = frame[t:b, l:r]
-    if region == coords["error"]:
-        hsv = cv.cvtColor(cropped, cv.COLOR_BGR2HSV)
-        mask1 = cv.inRange(hsv, lowerRed1, upperRed1)
-        mask2 = cv.inRange(hsv, lowerRed2, upperRed2)
-        redMask = cv.bitwise_or(mask1, mask2)
-        processed = np.full(cropped.shape, 255, dtype=np.uint8)
-        processed[redMask > 0] = [0, 0, 0]
-    else:
-        processed = cropped
-    if debug:
-        cv.imwrite(os.path.join('debug', f'ocr_{time.strftime("%Y%m%d_%H%M%S")}.png'), processed)
-    upscaled = cv.resize(processed, None, fx=4, fy=4, interpolation=cv.INTER_CUBIC)
-    results = reader.readtext(upscaled)
-    return ''.join([res[1] for res in results]).strip()
-
-def findBoxes(imgPath, threshold=0.70, debug=False):
-    frame = getLatestFrame()
-    if frame is None:
-        return []
-    tpl = cv.imread(imgPath, cv.IMREAD_COLOR)
-    if tpl is None:
-        return []
-    h, w = tpl.shape[:2]
-    res = cv.matchTemplate(frame, tpl, cv.TM_CCOEFF_NORMED)
-    loc = np.where(res >= threshold)
-    rects = [[x, y, w, h] for y, x in zip(*loc)]
-    if len(rects) == 0:
-        return []
-    rects, _ = cv.groupRectangles(rects * 2, 1, 0.5)
-    if debug and rects:
-        vis = frame.copy()
-        for x, y, w, h in rects:
-            cv.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        cv.imwrite(os.path.join('debug', f'boxes_{os.path.basename(imgPath)}_{time.time()}.png'), vis)
-    return rects
-
-def randomPointInRegion(acceptedRegion, deniedRegions=None):
-    if isinstance(acceptedRegion, (tuple, list)) and len(acceptedRegion) == 4 and not hasattr(acceptedRegion[0], "__iter__"):
-        l, t, r, b = acceptedRegion
-        while True:
-            x = random.randint(l, r)
-            y = random.randint(t, b)
-            if deniedRegions:
-                insideDenied = False
-                for dr in deniedRegions:
-                    dPts = np.array(dr, dtype=np.int32)
-                    if cv.pointPolygonTest(dPts, (x, y), False) >= 0:
-                        insideDenied = True
-                        break
-                if insideDenied:
-                    continue
-            return x, y
-    pts = np.array(acceptedRegion, dtype=np.int32)
-    xs, ys = pts[:, 0], pts[:, 1]
-    minX, maxX = xs.min(), xs.max()
-    minY, maxY = ys.min(), ys.max()
-    while True:
-        x = random.randint(minX, maxX)
-        y = random.randint(minY, maxY)
-        if cv.pointPolygonTest(pts, (x, y), False) >= 0:
-            if deniedRegions:
-                insideDenied = False
-                for dr in deniedRegions:
-                    dPts = np.array(dr, dtype=np.int32)
-                    if cv.pointPolygonTest(dPts, (x, y), False) >= 0:
-                        insideDenied = True
-                        break
-                if insideDenied:
-                    continue
-            return x, y
-
-def randomPointFromBoxes(boxes):
-    x, y, w, h = random.choice(boxes)
-    return random.randint(x, x + w - 1), random.randint(y, y + h - 1)
-
-# ---------- interaction ----------
-
-def moveAndClick(x, y, button=MouseButton.LEFT):
-    mouse.smooth_move(x, y)
-    mouse.click_human_like(button)
-
-def click(templatePath=None, region=None, delay=SLEEP_VERY_SHORT, debug=False):
-    if templatePath:
-        boxes = findBoxes(templatePath, debug=debug)
-        if len(boxes) == 0:
-            return False
-        x, y = randomPointFromBoxes(boxes)
-    elif region:
-        x, y = randomPointInRegion(region)
-    else:
-        return False
-    moveAndClick(x, y)
-    randomSleep(*delay)
-    return True
-
-def clickBoxes(boxes, delay=SLEEP_VERY_SHORT):
-    if len(boxes) == 0:
-        return False
-    x, y = randomPointFromBoxes(boxes)
-    moveAndClick(x, y)
-    randomSleep(*delay)
-    return True
-
-def atBuilderBase():
-    return len(findBoxes('images/home_builder.png')) == 0
-
-def switchBases():
-    if not atBuilderBase():
-        mouse.pan(-300, 200, MouseButton.LEFT)
-        randomSleep(*SLEEP_SHORT)
-        click(templatePath="images/ship.png", delay=SLEEP_VERY_SHORT)
-        randomSleep(*SLEEP_MEDIUM)
-
-def collectAll():
-    mouse.smooth_scroll(-30)
-    randomSleep(*SLEEP_SHORT)
-    builderMode = atBuilderBase()
-    if builderMode:
-        mouse.pan(200, -200, MouseButton.LEFT)
-        randomSleep(*SLEEP_SHORT)
-    for resourceName, resourcePath in resources.items():
-        if builderMode != resourceName.startswith("builder_"):
+def collect_resources(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
+    collectors = ["collector_gold", "collector_elixir", "collector_dark_elixir"]
+    for name in collectors:
+        t = template_set.get(name)
+        if t is None:
             continue
-        while True:
-            boxes = findBoxes(resourcePath)
-            if len(boxes) == 0:
-                break
-            clickBoxes(boxes)
-            randomSleep(*SLEEP_MEDIUM)
-            if builderMode and len(findBoxes("images/collect.png")) > 0:
-                click(templatePath="images/collect.png", delay=SLEEP_VERY_SHORT)
-                randomSleep(*SLEEP_VERY_SHORT)
-                click(templatePath="images/exit.png", delay=SLEEP_VERY_SHORT)
-                randomSleep(*SLEEP_SHORT)
-                break
-            click(templatePath="images/exit.png", delay=SLEEP_VERY_SHORT)
-            randomSleep(*SLEEP_SHORT)
+        frame = grab_frame_bgr(adb)
+        hits = tmpl.find_all(frame, t, threshold=0.80)
+        for x, y in hits:
+            adb.tap(x, y)
+            adb.wait_random(0.1, 0.3)
 
-def checkStats():
-    elixirTxt = ocrRegion(coords["elixir"])
-    goldTxt = ocrRegion(coords["gold"])
-    trophyTxt = ocrRegion(coords["trophies"])
+
+def check_resources_near_max(resources: dict[str, int | None], config: dict) -> bool:
+    trigger = config["resources"]["planner_trigger_pct"]
+    storage = config["resources"]["storage_max"]
+    for key in ("gold", "elixir"):
+        val = resources.get(key)
+        if val is None:
+            continue
+        # Reject OCR garbage — values larger than 4× storage cap are misreads.
+        if val > storage[key] * 4:
+            continue
+        if val >= storage[key] * trigger:
+            return True
+    return False
+
+
+def run_planner(adb: ADB, template_set: dict[str, tmpl.Template], config: dict) -> None:
+    log.info("Resources near max — running planner")
+
+    # Navigate to settings and export base state
+    frame = grab_frame_bgr(adb)
+    btn_settings = template_set.get("btn_settings_gear")
+    if not btn_settings:
+        log.error("No settings gear template")
+        return
+
+    pos = tmpl.find(frame, btn_settings)
+    if not pos:
+        log.warning("Settings button not found")
+        return
+
+    adb.tap(pos[0], pos[1])
+    adb.wait_random(1.0, 2.0)
+
+    # Tap "More Settings"
+    frame = grab_frame_bgr(adb)
+    btn_more = template_set.get("btn_more_settings")
+    if btn_more:
+        pos = tmpl.find(frame, btn_more)
+        if pos:
+            adb.tap(pos[0], pos[1])
+            adb.wait_random(1.0, 2.0)
+
+    # Scroll down and tap "Copy" in Data Export section
+    adb.swipe(640, 500, 640, 200, duration_ms=500)
+    adb.wait_random(0.5, 1.0)
+
+    frame = grab_frame_bgr(adb)
+    btn_copy = template_set.get("btn_copy_data")
+    if btn_copy:
+        pos = tmpl.find(frame, btn_copy)
+        if pos:
+            adb.tap(pos[0], pos[1])
+            adb.wait_random(1.0, 1.5)
+
+    # Read clipboard via Clipper APK
     try:
-        elixirNum = int(re.sub(r'\D+', '', elixirTxt))
-    except:
-        elixirNum = 0
+        raw_json = adb.read_clipboard()
+    except RuntimeError:
+        log.error("Failed to read clipboard — skipping planner")
+        adb.back()
+        adb.wait_random(0.5, 1.0)
+        adb.back()
+        return
+
+    # Close settings
+    adb.back()
+    adb.wait_random(0.5, 1.0)
+    adb.back()
+    adb.wait_random(0.5, 1.0)
+
     try:
-        goldNum = int(re.sub(r'\D+', '', goldTxt))
-    except:
-        goldNum = 0
+        base_state = parse_export(raw_json)
+    except Exception as e:
+        log.error(f"Failed to parse base state: {e}")
+        return
+
+    if base_state.free_builders == 0:
+        log.info("No free builders — skipping upgrades")
+        return
+
+    frame = grab_frame_bgr(adb)
+    resources = read_resources(frame)
+    clean_resources = {k: v or 0 for k, v in resources.items()}
+
+    planner_json = state_to_planner_json(base_state, clean_resources)
+
     try:
-        trophyNum = int(re.sub(r'\D+', '', trophyTxt))
-    except:
-        trophyNum = 0
-    print(f"[Stats] Elixir: {elixirNum}, Gold: {goldNum}, Trophies: {trophyNum}")
-    return elixirNum, goldNum, trophyNum
+        result = plan(planner_json, clean_resources)
+    except Exception as e:
+        log.error(f"Gemini planner failed: {e}")
+        return
 
-# ---------- attack ----------
+    for decision in result.decisions:
+        if decision.action == "wait" or decision.action == "skip":
+            log.info(f"Planner says {decision.action}: {decision.reasoning}")
+            continue
 
-def findMatch():
-    click(region=coords["attack"], delay=SLEEP_SHORT)
-    click(region=coords["find_match"], delay=SLEEP_VERY_SHORT)
-
-def attackOngoing():
-    global attackStateLast
-    txt = ocrRegion(coords["start_end"]).lower()
-    ongoing = "start" not in txt
-    if attackStateLast is None or ongoing != attackStateLast:
-        attackStateLast = ongoing
-    return ongoing
-
-def attackEnd(goHome=False):
-    boxes = findBoxes("images/return_home.png")
-    ended = len(boxes) > 0
-    if ended and goHome:
-        clickBoxes(boxes)
-    return ended
-
-def useUltimate():
-    boxes = findBoxes("images/ultimate.png")
-    if len(boxes) != 0:
-        randomSleep(*SLEEP_LONG)
-        mouse.click_human_like(MouseButton.MIDDLE)
-
-def deployHero(button=MouseButton.LEFT):
-    def heroDeployed():
-        return any(w in ocrRegion(coords["error"]).lower() for w in ("select", "different", "unit"))
-    mouse.click_human_like(MouseButton.MIDDLE)
-    while not heroDeployed():
-        x, y = randomPointInRegion(coords["troop_deploy"], (coords["enemy_base"], coords["boosts"]))
-        moveAndClick(x, y)
-        randomSleep(*SLEEP_VERY_SHORT)
-        mouse.click_human_like(button)
-
-def deployTroops(phase, button=MouseButton.LEFT):
-    def allDeployed():
-        return any(w in ocrRegion(coords["error"]).lower() for w in ("all", "forces", "deployed"))
-    if phase == 1:
-        mouse.click_human_like(MouseButton.MOUSE4)
-    elif phase == 2:
-        mouse.click_human_like(MouseButton.MOUSE5)
-    while not allDeployed():
-        x, y = randomPointInRegion(coords["troop_deploy"], (coords["enemy_base"], coords["boosts"]))
-        moveAndClick(x, y)
-        randomSleep(*SLEEP_VERY_SHORT)
-        mouse.click_human_like(button)
-
-def handleBattle():
-    randomSleep(*SLEEP_LONG)
-    randomSleep(*SLEEP_SHORT)
-    roundPhase = 1
-    matchStart = time.time()
-    while not attackEnd():
-        mouse.smooth_scroll(-30)
-        if not attackOngoing():
-            deployHero()
-            deployTroops(roundPhase)
-        while attackOngoing() and not attackEnd():
-            useUltimate()
-            randomSleep(*SLEEP_VERY_SHORT)
-        if roundPhase == 1 and time.time() - matchStart > 60:
-            roundPhase = 2
-        randomSleep(*SLEEP_VERY_SHORT)
-    attackEnd(goHome=True)
-    randomSleep(*SLEEP_MEDIUM)
-
-# ---------- main ----------
-
-def main():
-    global mouse, statsPrev, totalElixirGain, totalGoldGain, attackCount
-    mouse = createController()
-    threading.Thread(target=captureLoop, daemon=True).start()
-    os.startfile(r"C:\Users\advit\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Google Play Games\Clash of Clans.lnk")
-    os.startfile(r"C:\Users\advit\PycharmProjects\cocbot\rebind.ahk")
-    while len(findBoxes("images/coc.png")) == 0:
-        time.sleep(1)
-    clickBoxes(findBoxes("images/fullscreen.png"))
-    while len(findBoxes("images/army.png")) == 0:
-        time.sleep(1)
-    time.sleep(5)
-    while True:
-        collectAll()
-        if atBuilderBase():
-            elixirRaw, goldRaw, _ = checkStats()
-            elixir = elixirRaw if elixirRaw > 0 else (statsPrev[0] if statsPrev else 0)
-            gold = goldRaw if goldRaw > 0 else (statsPrev[1] if statsPrev else 0)
-            validElixir = 0 < elixir < 6000000
-            validGold = 0 < gold < 6000000
-            if (validElixir and elixir > 5500000) or (validGold and gold > 5500000):
-                break
-            statsPrev = (elixir, gold)
-            findMatch()
-            handleBattle()
-            collectAll()
-            newElixir, newGold, _ = checkStats()
-            gainElixir = 0
-            gainGold = 0
-            if statsPrev and 0 < newElixir < 6000000 and 0 < statsPrev[0] < 6000000:
-                gainElixir = max(0, newElixir - statsPrev[0])
-            if statsPrev and 0 < newGold < 6000000 and 0 < statsPrev[1] < 6000000:
-                gainGold = max(0, newGold - statsPrev[1])
-            attackCount += 1
-            totalElixirGain += gainElixir
-            totalGoldGain += gainGold
-            avgElixir = totalElixirGain // attackCount
-            avgGold = totalGoldGain // attackCount
+        if decision.action == "upgrade_hero":
+            execute_hero_upgrade(adb, decision, template_set)
         else:
-            switchBases()
+            execute_upgrade(adb, decision, template_set)
+
+
+def attack_cycle(
+    adb: ADB,
+    template_set: dict[str, tmpl.Template],
+    config: dict,
+    state_detector: StateDetector,
+) -> tuple[bool, dict]:
+    farming = config["farming"]
+    thresholds = LootThresholds(
+        min_gold=farming["min_gold"],
+        min_elixir=farming["min_elixir"],
+        min_dark_elixir=farming["min_dark_elixir"],
+        max_skips=farming["max_skips"],
+        decay=farming["skip_threshold_decay"],
+    )
+
+    res_before = read_resources(grab_frame_bgr(adb))
+    info: dict = {"res_before": res_before}
+
+    if not enter_matchmaking(adb, template_set):
+        info["abort"] = "enter_matchmaking_failed"
+        return False, info
+
+    # Hard gate: must reach BATTLE state within 10s, otherwise the army-view
+    # ATTACK tap missed or matchmaking aborted.
+    if not state_detector.wait_for(GameState.BATTLE, lambda: grab_frame_bgr(adb), timeout=10.0):
+        log.warning("Did not reach BATTLE after enter_matchmaking — aborting")
+        # Try to back out gracefully.
+        adb.back()
+        adb.wait_random(1.0, 2.0)
+        info["abort"] = "no_battle_state"
+        return False, info
+
+    loot = search_loop(adb, template_set, thresholds)
+    if loot is None:
+        log.warning("Search loop gave up — ending battle")
+        end_battle_warmup(adb)
+        info["abort"] = "no_loot_threshold"
+        return False, info
+
+    info["loot"] = {"gold": loot.gold, "elixir": loot.elixir, "dark": loot.dark_elixir}
+
+    deploy_sneaky_goblins(adb, template_set)
+    deploy_heroes(adb, template_set)
+
+    # Confirm we're STILL in battle after deploy. If state flipped to HOME,
+    # the deploy taps landed off-target (e.g., we never actually entered battle).
+    cur = state_detector.detect(grab_frame_bgr(adb))
+    if cur != GameState.BATTLE and cur != GameState.RESULT:
+        log.warning(f"Not in BATTLE after deploy (state={cur.name}) — fake cycle")
+        info["abort"] = "deploy_off_target"
+        return False, info
+
+    monitor_battle(adb, template_set)
+
+    # Wait for RESULT screen (must reach within 30s; battle naturally ends or surrender resolves).
+    if not state_detector.wait_for(GameState.RESULT, lambda: grab_frame_bgr(adb), timeout=30.0):
+        log.warning("RESULT screen not reached — pressing back")
+        adb.back()
+        adb.wait_random(1.5, 2.5)
+
+    return_home(adb, template_set)
+    close_modal(adb, template_set)
+
+    # Post-attack reward animations chain 3-5 screens (chest closed → opens
+    # → reveal item → "Continue" → next chest). Use raw classify (not the
+    # smoothed StateDetector) to break out as soon as home is visible —
+    # otherwise the loop keeps tapping after we've returned and accidentally
+    # opens the Shop (1230, 700 = Shop icon on home).
+    from screen.state import classify, detect_signals
+    for _ in range(20):
+        frame = grab_frame_bgr(adb)
+        sig = detect_signals(frame, template_set, threshold=0.70)
+        if classify(sig) == GameState.HOME:
+            break
+        adb.tap(640, 400)        # tap chest/item to advance the open animation
+        time.sleep(0.4)
+        adb.tap(640, 595)        # tap Continue button for reveal screens
+        time.sleep(0.5)
+
+    if not state_detector.wait_for(GameState.HOME, lambda: grab_frame_bgr(adb), timeout=25.0):
+        log.error("Could not return to HOME after attack — needs CoC restart")
+        info["abort"] = "no_home_after_battle"
+        return False, info
+
+    res_after = read_resources(grab_frame_bgr(adb))
+    info["res_after"] = res_after
+
+    # Compute delta defensively — OCR can return None or wildly wrong values.
+    def _delta(key: str) -> int | None:
+        b, a = res_before.get(key), res_after.get(key)
+        if b is None or a is None:
+            return None
+        if abs(b) > 10_000_000_000 or abs(a) > 10_000_000_000:
+            return None  # OCR garbage
+        return a - b
+    info["delta"] = {k: _delta(k) for k in ("gold", "elixir", "dark_elixir")}
+
+    return True, info
+
+
+def should_take_break(session_start: float, config: dict) -> bool:
+    interval = config["session"]["break_interval_hours"] * 3600
+    jitter = random.uniform(-600, 600)  # ±10 min
+    return time.time() - session_start >= interval + jitter
+
+
+def take_break(adb: ADB, config: dict) -> None:
+    lo, hi = config["session"]["break_duration_min"]
+    duration = random.uniform(lo, hi) * 60
+    log.info(f"Taking break for {duration / 60:.0f} minutes")
+    adb.kill_coc()
+    time.sleep(duration)
+    adb.launch_coc()
+    time.sleep(15)  # loading screen
+
+
+def main() -> None:
+    setup_logging()
+    config = load_config()
+
+    adb_config = ADBConfig(
+        port_range=tuple(config["emulator"]["adb_port_range"]),
+        tap_jitter_px=config["delays"]["tap_jitter_px"],
+        delay_range_ms=tuple(config["delays"]["between_actions_ms"]),
+    )
+    adb = ADB(config=adb_config)
+
+    log.info("Connecting to BlueStacks...")
+    addr = adb.connect()
+    log.info(f"Connected: {addr}")
+
+    res = adb.get_resolution()
+    log.info(f"Resolution: {res[0]}x{res[1]}")
+
+    template_set = tmpl.load_all()
+    log.info(f"Loaded {len(template_set)} templates")
+
+    state_detector = StateDetector(template_set)
+
+    if not adb.is_coc_running():
+        log.info("Launching CoC...")
+        adb.launch_coc()
+        adb.wait(15)
+
+    session_start = time.time()
+    attack_count = 0
+    consecutive_failures = 0
+    consecutive_unknown = 0
+    home_zoomed_out = False
+
+    log.info("Starting farming loop")
+
+    while True:
+        frame = grab_frame_bgr(adb)
+        state = state_detector.detect(frame)
+
+        if state == GameState.MODAL:
+            close_modal(adb, template_set)
+            consecutive_unknown = 0
+            continue
+
+        if state == GameState.UNKNOWN:
+            consecutive_unknown += 1
+            if consecutive_unknown >= 4:
+                log.warning("UNKNOWN x4 — force-restarting CoC")
+                adb.kill_coc()
+                time.sleep(2)
+                adb.launch_coc()
+                time.sleep(20)
+                state_detector.reset()
+                consecutive_unknown = 0
+                continue
+            # Recovery ladder for unknown screens:
+            # 1st: tap chest/center to advance reward animations
+            # 2nd: tap red close-X if a modal
+            # 3rd: BACK as last resort before CoC restart
+            if consecutive_unknown == 1:
+                log.info("UNKNOWN x1 — tap (640, 400) to advance reward / dismiss overlay")
+                adb.tap(640, 400)
+            elif consecutive_unknown == 2:
+                close_pos = find_red_close_x(frame)
+                if close_pos is not None:
+                    log.info(f"UNKNOWN x2 — tap red close-X at {close_pos}")
+                    adb.tap(close_pos[0], close_pos[1])
+                else:
+                    adb.back()
+            elif consecutive_unknown == 3:
+                adb.back()
+            adb.wait_random(1.0, 2.0)
+            continue
+
+        if state != GameState.HOME:
+            adb.back()
+            adb.wait_random(1.0, 2.0)
+            continue
+
+        consecutive_unknown = 0
+
+        # Pinch home village out once per session so collect_resources sees
+        # all collectors at default scroll. CoC keeps the zoom level until
+        # something else (battle, modal) resets it.
+        if not home_zoomed_out:
+            log.info("Zooming out home village (UP-arrow via BlueStacks keymap)")
+            adb.bluestacks_zoom_out(taps=10)
+            adb.wait_random(0.4, 0.7)
+            home_zoomed_out = True
+
+        if should_take_break(session_start, config):
+            take_break(adb, config)
+            session_start = time.time()
+            continue
+
+        collect_resources(adb, template_set)
+
+        frame = grab_frame_bgr(adb)
+        resources = read_resources(frame)
+        log.info(f"Resources: {resources}")
+
+        # Planner trigger disabled until ca.zgrs.clipper is sideloaded.
+        # The org.rojekti.clipper variant doesn't expose `clipper.get`, so
+        # run_planner currently fails on read_clipboard and disrupts the
+        # state machine (settings panel left open).
+        if False and check_resources_near_max(resources, config):
+            run_planner(adb, template_set, config)
+
+        cycle_started_at = time.time()
+        result, info = attack_cycle(adb, template_set, config, state_detector)
+        cycle_duration = time.time() - cycle_started_at
+        if result:
+            attack_count += 1
+            consecutive_failures = 0
+            delta = info.get("delta", {})
+            log.info(
+                f"Attack #{attack_count} complete ({cycle_duration:.1f}s) Δ "
+                f"gold={delta.get('gold')} elixir={delta.get('elixir')} dark={delta.get('dark_elixir')}"
+            )
+            append_raid_log({
+                "cycle": attack_count,
+                "duration_s": round(cycle_duration, 1),
+                "result": "completed",
+                "loot_seen": info.get("loot"),
+                "delta": delta,
+                "res_before": info.get("res_before"),
+                "res_after": info.get("res_after"),
+            })
+        else:
+            consecutive_failures += 1
+            abort_reason = info.get("abort", "unknown")
+            log.warning(
+                f"Attack cycle failed [{abort_reason}] ({consecutive_failures} in a row) — retrying in 5s"
+            )
+            append_raid_log({
+                "cycle": attack_count + 1,
+                "duration_s": round(cycle_duration, 1),
+                "result": "failed",
+                "abort_reason": abort_reason,
+            })
+            if consecutive_failures >= 5:
+                log.warning("Too many failures — force-restarting CoC")
+                adb.kill_coc()
+                time.sleep(2)
+                adb.launch_coc()
+                time.sleep(20)
+                state_detector.reset()
+                consecutive_failures = 0
+            adb.wait(5)
+
 
 if __name__ == "__main__":
     main()
