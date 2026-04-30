@@ -1,83 +1,44 @@
-# Clash of Clans Builder Base Farming Bot
+# clash-farmer
 
-Automates builder base farming in Clash of Clans using computer vision and a hardware mouse controller.
+Home-base farming bot for Clash of Clans on BlueStacks (macOS). Drives the standard farm loop via ADB and template matching; optional Gemini hook for upgrade decisions when storages fill.
 
-## What it does
-
-Launches Clash of Clans through the Google Play Games emulator on Windows, navigates to the builder base, attacks repeatedly, collects loot, and loops until your resources hit a target threshold. The whole thing runs unattended.
-
-The bot handles the full cycle: detecting game state, starting attacks, deploying troops in phases, using the hero ability, waiting through battle results, collecting rewards, and sailing back to attack again.
-
-## How it works
-
-The pipeline has four main pieces: screen capture, vision, decision logic, and mouse control.
-
-**Screen capture** uses `mss` to grab frames from the emulator window.
-
-**Vision** is split between template matching and OCR. OpenCV template matching finds UI elements (army button, ship, collect buttons, resource icons, error dialogs). EasyOCR reads resource counts (gold, elixir, trophies) from specific screen regions, with 4x upscaling because the text is small and OCR struggles at native resolution. Red error text is detected separately through HSV color masking.
-
-**Decision logic** is a state machine in `main.py` (~370 lines). It figures out where in the game loop you are, what to click next, and when to deploy troops. Attack sequencing deploys the hero first, then troops in phases, fires the ultimate ability, and handles multi-round battles.
-
-**Mouse control** goes through a Makcu device, a custom USB HID controller. This is a physical mouse controller, not software automation, so the game sees real hardware input.
-
-## The Makcu driver
-
-The `makcu/` package (~330 lines) is a custom driver for the Makcu USB HID device. It communicates over serial with baud negotiation (starts at 115200, switches to 4M for speed).
-
-Mouse movement uses a physics simulation with gravity and wind parameters to produce Bezier-like curves. Movements look human because they have acceleration, overshoot, and slight randomness baked in. The driver supports all five mouse buttons (left, right, middle, mouse4, mouse5).
-
-AutoHotkey scripts rebind mouse buttons to keyboard keys for troop selection, since the game maps troop slots to keyboard shortcuts.
-
-## Tech stack
-
-- Python (screen capture, vision, control logic)
-- OpenCV (template matching, color detection)
-- EasyOCR (reading resource counts from screen)
-- mss (fast screen capture)
-- pyserial (Makcu device communication)
-- pywin32 (window management)
-- AutoHotkey (key rebinding)
-- Google Play Games emulator (runs the game on Windows)
+```bash
+uv sync
+uv run python main.py
+```
 
 ## Setup
 
-1. Connect the Makcu device via USB.
-2. Install the Google Play Games emulator and log into Clash of Clans.
-3. Place template images in the `images/` directory (screenshots of UI elements the bot needs to recognize).
-4. Set up the AutoHotkey script for troop key rebinds.
-5. Install dependencies:
+- BlueStacks Air, instance Tiramisu64 (Android 13), 6 GB RAM
+- ADB enabled in BlueStacks Settings → Advanced
+- 1280×720 @ 240 DPI
+- Logged in to Clash of Clans on the home village
+- `.env` with `GEMINI_API_KEY` (only needed if you enable the planner)
+
+## Loop
 
 ```
-pip install -r requirements.txt
+home → attack → find a match → army view → ATTACK
+              → battle warmup (read loot, skip / commit)
+              → deploy goblins + heroes → battle → result
+              → return home → dismiss reward chests
 ```
 
-## Usage
+Zoom-out is driven from the host via `osascript` (BlueStacks' default CoC keymap binds the up-arrow to in-game pinch-out — ADB `input` can't do real multi-touch on the Virtual Touch device).
 
-```
-python main.py
-```
+## Modules
 
-The bot will launch the game, navigate to the builder base, and start farming. It logs resource counts and current state to the console. Kill the process to stop it.
+| Path | Notes |
+|------|-------|
+| `screen/` | screencap, template match, OCR, state classifier |
+| `input/` | ADB driver (tap, swipe, multitouch attempts, host-side keystroke) |
+| `attack/` | matchmaking flow, search-loop, deploy, battle monitor |
+| `planner/` | Gemini structured output, JSON export parser |
+| `upgrade/` | building nav + upgrade tap helpers |
+| `tools/` | calibrate, capture, test_planner |
 
-## Dependencies
+## Known limitations
 
-- numpy
-- opencv-python
-- easyocr
-- mss
-- pyserial
-- pywin32
-
-## Project structure
-
-```
-main.py              # Bot logic, state machine, attack sequencing
-rebind.ahk           # AutoHotkey key rebinds for troop selection
-images/              # Template images for UI element detection
-makcu/               # Hardware mouse controller driver
-  connection.py      # Serial transport, baud negotiation
-  controller.py      # High-level mouse API, physics-based movement
-  mouse.py           # Low-level HID button and movement commands
-  enums.py           # MouseButton enum
-  errors.py          # Exception classes
-```
+- The bot relies on BlueStacks' default CoC keymap for zoom; pinch can't be driven from ADB alone.
+- The org.rojekti.clipper variant doesn't expose a broadcast API. Live JSON-export → planner needs `ca.zgrs.clipper`. Planner is exercised against a synthetic state in `tools/test_planner.py`.
+- Top-right resource OCR is noisy. Loot OCR (top-left of warmup screen) is reliable enough to gate the attack/skip decision; net loot per cycle is checked from the resource bar at the start/end of each cycle.
