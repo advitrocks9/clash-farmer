@@ -2,8 +2,8 @@
 
 Verified flow on 2026-04-30 against live game:
   1. Tap (i) info button on the builder/lab top-bar icon
-       Builder (i): (575, 17)
-       Lab (i):     (747, 17)
+       Lab (i):     (413, 18)  — LEFTMOST in the top-center strip
+       Builder (i): (575, 17)  — middle
   2. A tooltip opens showing 'Upgrades in progress' + 'Suggested upgrades:'
      with one row per upgrade (icon + name + cost).
   3. Tap inside a row → game pans to the suggested building and opens its
@@ -36,8 +36,12 @@ from screen.state import find_red_close_x
 
 log = logging.getLogger(__name__)
 
+# Top-center icons left-to-right (verified by user 2026-04-30 22:30):
+#   - LEFTMOST (i)  → LAB         (research queue, e.g. '1/1')
+#   - MIDDLE   (i)  → BUILDER     (free/total builders, e.g. '4/6')
+#   - RIGHTMOST(i)  → IRRELEVANT  (don't tap)
+LAB_INFO_POS = (413, 18)
 BUILDER_INFO_POS = (575, 17)
-LAB_INFO_POS = (747, 17)
 TOOLTIP_ROW_X = 550  # left-of-centre column, lands inside any row
 CONFIRM_BTN = (897, 629)
 
