@@ -469,6 +469,20 @@ def main() -> None:
             return f"{int(hours * 60)}m"
         return f"{hours:.1f}h"
 
+    def _short_status(resources: dict, deltas: dict | None = None) -> str:
+        """One-line status: '🪙 18.2M (+1.2M)  💧 14.5M (+800K)  🟣 390K (+5K)'."""
+        parts = []
+        for icon, key in (("🪙", "gold"), ("💧", "elixir"), ("🟣", "dark_elixir")):
+            val = resources.get(key)
+            piece = f"{icon} {_fmt(val) if isinstance(val, int) else '—'}"
+            if deltas:
+                d = deltas.get(key)
+                if isinstance(d, int) and d != 0:
+                    sign = "+" if d > 0 else ""
+                    piece += f" ({sign}{_fmt(d)})"
+            parts.append(piece)
+        return "  ".join(parts)
+
     def _status_text() -> str:
         secs = max(int(time.time() - session_anchor), 1)
         score = loot_score(**session_loot)
@@ -666,11 +680,20 @@ def main() -> None:
                     if n > 0:
                         actions.append(f"{n} walls")
                 if actions:
-                    msg = f"🛠 spent excess {kind}: {', '.join(actions)}"
+                    # Re-read resources after spending to show what's left.
+                    after = read_resources(grab_frame_bgr(adb))
+                    msg = (
+                        f"🛠 spent {kind}: {', '.join(actions)}\n"
+                        f"{_short_status(after)}"
+                    )
                     telegram.send(msg, silent=True)
-                    metrics.log_event("spend", resource=kind, actions=actions)
+                    metrics.log_event("spend", resource=kind, actions=actions, after=after)
                 else:
-                    telegram.send(f"⚠️ {kind} maxed but no upgrade available", silent=True)
+                    telegram.send(
+                        f"⚠️ {kind} maxed but no upgrade available\n"
+                        f"{_short_status(resources)}",
+                        silent=True,
+                    )
                     metrics.log_event("spend", resource=kind, actions=[])
             except Exception as e:
                 log.error(f"spend flow failed: {e}")
@@ -711,6 +734,17 @@ def main() -> None:
             log.info(
                 f"  cycle score {cycle_score:,} | session {score_per_hr:,}/hr "
                 f"({session_score:,} over {session_secs/60:.0f} min)"
+            )
+            res_after = info.get("res_after") or {}
+            cycle_delta = {
+                "gold": delta.get("gold") if isinstance(delta.get("gold"), int) else None,
+                "elixir": delta.get("elixir") if isinstance(delta.get("elixir"), int) else None,
+                "dark_elixir": delta.get("dark_elixir") if isinstance(delta.get("dark_elixir"), int) else None,
+            }
+            telegram.send(
+                f"✅ #{attack_count} {cycle_duration:.0f}s · "
+                f"{_short_status(res_after, deltas=cycle_delta)}",
+                silent=True,
             )
             if time.time() - digest_anchor >= 3600:
                 telegram.send(_status_text(), silent=True)
