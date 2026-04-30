@@ -44,7 +44,7 @@ from planner.export import parse_export, state_to_planner_json
 from planner.gemini import plan
 from screen import templates as tmpl
 from screen.capture import grab_frame_bgr
-from screen.ocr import read_resources
+from screen.ocr import read_builders, read_resources
 import metrics
 from recovery import recover_to_home
 from screen.state import GameState, StateDetector, find_red_close_x
@@ -632,22 +632,37 @@ def main() -> None:
             except Exception as e:
                 log.error(f"planner failed, continuing farm: {e}")
 
-        # Spend excess into walls before attacking — walls upgrade instantly
-        # in TH15+ and absorb 3M-5M gold or elixir per tap, so storages
-        # don't waste loot we can't store.
+        # Spend excess BEFORE attacking, so storages don't waste loot.
+        # Strategy:
+        #   - Builder suggestions ONLY if free_builders >= 2 — keeps 1
+        #     builder reserved so wall fallback never gets blocked.
+        #   - Lab suggestions for elixir/dark (lab is independent of the
+        #     6 builder slots — has its own queue).
+        #   - Pet House for elixir surplus that the lab can't absorb.
+        #   - Walls as the final fallback (instant, no builder needed).
+        builders = read_builders(grab_frame_bgr(adb))
+        free_builders = builders[0] if builders else None
+        log.info(f"builders: {builders}")
+        metrics.log_event("home_state", builders=builders, resources=resources)
         for kind in maxed_resources(resources, config):
             log.info(f"resource {kind} maxed — running spend flow")
             try:
-                # Prefer the in-game Builder suggestion list (real upgrades
-                # for free builders). Then try Pet House (its own slot, no
-                # suggestion list). Fall back to a single wall upgrade.
-                ok = suggest.upgrade_top_suggestion(adb, template_set, kind="builder")
-                if not ok:
+                ok = False
+                # 1. Builder suggestion (only if we'd still have ≥1 free).
+                if free_builders is not None and free_builders >= 2:
+                    ok = suggest.upgrade_top_suggestion(adb, template_set, kind="builder")
+                # 2. Lab suggestion for elixir/dark — lab is independent of
+                #    builder slots, so always try when an elixir/dark surplus.
+                if not ok and kind in ("elixir", "dark_elixir"):
+                    ok = suggest.upgrade_top_suggestion(adb, template_set, kind="lab")
+                # 3. Pet House (own slot, no builder consumed for short upgrades).
+                if not ok and kind == "elixir":
                     ok = suggest.upgrade_pet_house(adb, template_set)
+                # 4. Wall — instant, no builder lock. Always available.
                 if not ok:
                     ok = walls.try_wall_upgrade(adb, template_set, kind=kind)
                 if ok:
-                    telegram.send(f"🛠 spent excess {kind} on an upgrade", silent=True)
+                    telegram.send(f"🛠 spent excess {kind}", silent=True)
                     metrics.log_event("spend", resource=kind, success=True)
                 else:
                     telegram.send(f"⚠️ {kind} maxed but no upgrade available", silent=True)

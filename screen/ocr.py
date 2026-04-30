@@ -162,12 +162,16 @@ def read_loot(frame: np.ndarray) -> dict[str, int | None]:
 
 
 def read_builders(frame: np.ndarray) -> tuple[int, int] | None:
+    """Read the 'free/total' builder count from the top-bar builder icon.
+
+    Returns (free, total) tuple, e.g. (4, 6). Returns None on OCR failure.
+    """
     x1, y1, x2, y2 = get_roi("builders")
     crop = frame[y1:y2, x1:x2]
-    binary = _preprocess(crop, scale=3)
+    upscaled = cv2.resize(crop, (crop.shape[1] * 4, crop.shape[0] * 4), interpolation=cv2.INTER_CUBIC)
     reader = _get_reader()
     results = reader.readtext(
-        binary,
+        upscaled,
         allowlist="0123456789/",
         detail=1,
         paragraph=False,
