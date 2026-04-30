@@ -40,54 +40,56 @@ class LootResult:
         )
 
 
-def enter_matchmaking(adb: ADB, template_set: dict[str, tmpl.Template]) -> bool:
-    """HOME → Attack button → Find a Match → Army view → ATTACK button → battle warmup.
-
-    Returns True if all four taps land successfully. Caller still needs to
-    verify state == BATTLE before deploying.
+def _find_with_retry(
+    adb: ADB,
+    template_set: dict[str, tmpl.Template],
+    name: str,
+    roi: tmpl.ROI | None = None,
+    threshold: float = 0.7,
+    attempts: int = 4,
+    interval: float = 0.4,
+) -> tuple[int, int] | None:
+    """Re-grab the frame up to `attempts` times before giving up — UI
+    transitions can hold a stale/empty frame for ~1 s after a tap.
     """
+    t = template_set.get(name)
+    if t is None:
+        return None
+    for _ in range(attempts):
+        frame = grab_frame_bgr(adb)
+        pos = tmpl.find(frame, t, threshold=threshold, roi=roi)
+        if pos is not None:
+            return pos
+        adb.wait(interval)
+    return None
+
+
+def enter_matchmaking(adb: ADB, template_set: dict[str, tmpl.Template]) -> bool:
+    """HOME → Attack → Find a Match → Army view → green ATTACK → battle warmup."""
     frame = grab_frame_bgr(adb)
-    # Dismiss any popup with a red close-X in the top-right (Army, Treasure
-    # shop, event widget, etc.) before reaching for the Attack button.
     close_pos = find_red_close_x(frame)
     if close_pos is not None:
         adb.tap(close_pos[0], close_pos[1])
         adb.wait_random(0.6, 1.2)
-        frame = grab_frame_bgr(adb)
 
-    # Tap home Attack shield.
-    btn_attack = template_set.get("btn_attack")
-    if btn_attack is None:
-        log.error("btn_attack template not loaded")
-        return False
-    pos = tmpl.find(frame, btn_attack, roi=(0, 580, 250, 720))
+    pos = _find_with_retry(adb, template_set, "btn_attack", roi=(0, 580, 250, 720))
     if pos is None:
         log.warning("home Attack button not found")
         return False
     adb.tap(pos[0], pos[1] + 5)
     adb.wait_random(1.5, 2.5)
 
-    # Tap Find a Match.
-    frame = grab_frame_bgr(adb)
-    btn_find = template_set.get("btn_find_match")
-    if btn_find is None:
-        log.error("btn_find_match template not loaded")
-        return False
-    pos = tmpl.find(frame, btn_find)
+    pos = _find_with_retry(adb, template_set, "btn_find_match", threshold=0.65)
     if pos is None:
         log.warning("Find a Match button not found")
         return False
     adb.tap(pos[0], pos[1])
     adb.wait_random(2.5, 4.0)
 
-    # Tap green ATTACK on the army-view screen — without this step, the bot
-    # never actually enters battle.
-    frame = grab_frame_bgr(adb)
-    btn_search = template_set.get("btn_search_attack")
-    if btn_search is None:
-        log.error("btn_search_attack template not loaded — re-capture from army view")
-        return False
-    pos = tmpl.find(frame, btn_search, roi=(950, 580, 1280, 720), threshold=0.75)
+    pos = _find_with_retry(
+        adb, template_set, "btn_search_attack",
+        roi=(950, 580, 1280, 720), threshold=0.7, attempts=6, interval=0.5,
+    )
     if pos is None:
         log.warning("Army-view ATTACK button not found")
         return False

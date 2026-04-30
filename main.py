@@ -204,13 +204,15 @@ def attack_cycle(
         info["abort"] = "enter_matchmaking_failed"
         return False, info
 
-    # Hard gate: must reach BATTLE state within 10s, otherwise the army-view
-    # ATTACK tap missed or matchmaking aborted.
     if not state_detector.wait_for(GameState.BATTLE, lambda: grab_frame_bgr(adb), timeout=10.0):
-        log.warning("Did not reach BATTLE after enter_matchmaking — aborting")
-        # Try to back out gracefully.
-        adb.back()
-        adb.wait_random(1.0, 2.0)
+        log.warning("Did not reach BATTLE after enter_matchmaking — backing out")
+        # Likely stuck on army view with the ATTACK tap missed. BACK three
+        # times to walk home → matchmaking → army → home.
+        for _ in range(3):
+            adb.back()
+            adb.wait_random(0.8, 1.2)
+            if state_detector.detect(grab_frame_bgr(adb)) == GameState.HOME:
+                break
         info["abort"] = "no_battle_state"
         return False, info
 
@@ -345,14 +347,22 @@ def main() -> None:
 
         if state == GameState.UNKNOWN:
             consecutive_unknown += 1
-            if consecutive_unknown >= 4:
-                log.warning("UNKNOWN x4 — force-restarting CoC")
+            # Two CoC restarts didn't recover — game is likely in a
+            # maintenance break, login flow, or network outage. Sleep then
+            # retry rather than spinning every 1.5s.
+            if consecutive_unknown >= 12:
+                log.warning("UNKNOWN x12 — long sleep (5 min) then retry")
+                time.sleep(300)
+                state_detector.reset()
+                consecutive_unknown = 0
+                continue
+            if consecutive_unknown >= 4 and consecutive_unknown % 4 == 0:
+                log.warning(f"UNKNOWN x{consecutive_unknown} — force-restarting CoC")
                 adb.kill_coc()
                 time.sleep(2)
                 adb.launch_coc()
                 time.sleep(20)
                 state_detector.reset()
-                consecutive_unknown = 0
                 continue
             # Recovery ladder for unknown screens:
             # 1st: tap chest/center to advance reward animations
