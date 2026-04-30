@@ -126,14 +126,10 @@ def monitor_battle(
 
 
 def _surrender(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
-    btn = template_set.get("btn_surrender")
-    if btn:
-        frame = grab_frame_bgr(adb)
-        pos = tmpl.find(frame, btn, roi=(0, 640, 200, 720))
-        if pos:
-            adb.tap(pos[0], pos[1])
-            adb.wait_random(0.5, 1.0)
-
+    # End Battle red button location (battle view bottom-left).
+    adb.tap_precise(85, 540)
+    adb.wait_random(0.5, 1.0)
+    # The "Surrender?" confirm dialog has Okay (green) on the right.
     btn_confirm = template_set.get("btn_confirm_surrender")
     if btn_confirm:
         frame = grab_frame_bgr(adb)
@@ -141,6 +137,10 @@ def _surrender(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
         if pos:
             adb.tap(pos[0], pos[1])
             adb.wait_random(1.0, 2.0)
+            return
+    # Fallback: tap the known Okay position.
+    adb.tap_precise(782, 412)
+    adb.wait_random(1.0, 2.0)
 
 
 def wait_for_result_screen(adb: ADB, template_set: dict[str, tmpl.Template], timeout: float = 15.0) -> bool:
