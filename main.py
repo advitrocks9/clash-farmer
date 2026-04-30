@@ -47,6 +47,7 @@ from screen.capture import grab_frame_bgr
 from screen.ocr import read_resources
 from recovery import recover_to_home
 from screen.state import GameState, StateDetector, find_red_close_x
+from upgrade import walls
 from upgrade.execute import execute_hero_upgrade, execute_upgrade
 
 log = logging.getLogger("clash-farmer")
@@ -122,6 +123,22 @@ def check_resources_near_max(resources: dict[str, int | None], config: dict) -> 
         if val >= storage[key] * trigger:
             return True
     return False
+
+
+def maxed_resources(resources: dict[str, int | None], config: dict) -> list[str]:
+    """Return the resources at >= spend_threshold_pct of cap, valid OCR only."""
+    threshold = config["resources"].get("spend_threshold_pct", 0.95)
+    storage = config["resources"]["storage_max"]
+    out = []
+    for key in ("gold", "elixir"):
+        val = resources.get(key)
+        if val is None:
+            continue
+        if val > storage[key] * 4:  # OCR garbage
+            continue
+        if val >= storage[key] * threshold:
+            out.append(key)
+    return out
 
 
 def run_planner(adb: ADB, template_set: dict[str, tmpl.Template], config: dict) -> None:
@@ -601,6 +618,20 @@ def main() -> None:
                 last_planner_run = time.time()
             except Exception as e:
                 log.error(f"planner failed, continuing farm: {e}")
+
+        # Spend excess into walls before attacking — walls upgrade instantly
+        # in TH15+ and absorb 3M-5M gold or elixir per tap, so storages
+        # don't waste loot we can't store.
+        for kind in maxed_resources(resources, config):
+            log.info(f"resource {kind} maxed — upgrading a wall before attacking")
+            try:
+                ok = walls.try_wall_upgrade(adb, template_set, kind=kind)
+                if ok:
+                    telegram.send(f"🧱 wall upgraded with {kind} (storage was full)", silent=True)
+                else:
+                    telegram.send(f"⚠️ {kind} maxed but wall upgrade failed", silent=True)
+            except Exception as e:
+                log.error(f"wall upgrade failed: {e}")
 
         cycle_started_at = time.time()
         result, info = attack_cycle(adb, template_set, config, state_detector)
