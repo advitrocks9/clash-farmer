@@ -83,7 +83,23 @@ def _parse_resource_string(text: str) -> int | None:
         return None
 
 
-def read_number(frame: np.ndarray, roi: ROI, scale: int = 3) -> int | None:
+# Reject anything beyond plausibility — TH15 storages cap below 20M gold/elixir
+# and ~3M dark including treasury. EasyOCR occasionally concatenates digit groups
+# wrong and emits 9-12 digit numbers; clamp so callers don't see garbage.
+_MAX_PLAUSIBLE = {
+    "gold": 100_000_000,
+    "elixir": 100_000_000,
+    "dark_elixir": 10_000_000,
+    "loot": 10_000_000,
+}
+
+
+def read_number(
+    frame: np.ndarray,
+    roi: ROI,
+    scale: int = 3,
+    max_plausible: int | None = None,
+) -> int | None:
     """Read a resource number from a frame ROI.
 
     Resource numbers in CoC are space-separated digit groups (e.g. "7 619 532").
@@ -105,28 +121,36 @@ def read_number(frame: np.ndarray, roi: ROI, scale: int = 3) -> int | None:
     )
     if not results:
         return None
-    # Filter low-confidence segments and sort left-to-right for concatenation.
     good = [(bbox, text, conf) for bbox, text, conf in results if conf >= 0.4]
     if not good:
         return None
     good.sort(key=lambda r: min(p[0] for p in r[0]))
     concat = "".join(text for _, text, _ in good)
-    return _parse_resource_string(concat)
+    value = _parse_resource_string(concat)
+    if value is None:
+        return None
+    if max_plausible is not None and value > max_plausible:
+        return None
+    return value
 
 
 def read_resources(frame: np.ndarray) -> dict[str, int | None]:
     return {
-        "gold": read_number(frame, get_roi("res_gold")),
-        "elixir": read_number(frame, get_roi("res_elixir")),
-        "dark_elixir": read_number(frame, get_roi("res_dark_elixir")),
+        "gold": read_number(frame, get_roi("res_gold"), max_plausible=_MAX_PLAUSIBLE["gold"]),
+        "elixir": read_number(frame, get_roi("res_elixir"), max_plausible=_MAX_PLAUSIBLE["elixir"]),
+        "dark_elixir": read_number(
+            frame, get_roi("res_dark_elixir"), max_plausible=_MAX_PLAUSIBLE["dark_elixir"]
+        ),
     }
 
 
 def read_loot(frame: np.ndarray) -> dict[str, int | None]:
     return {
-        "gold": read_number(frame, get_roi("loot_gold")),
-        "elixir": read_number(frame, get_roi("loot_elixir")),
-        "dark_elixir": read_number(frame, get_roi("loot_dark_elixir")),
+        "gold": read_number(frame, get_roi("loot_gold"), max_plausible=_MAX_PLAUSIBLE["loot"]),
+        "elixir": read_number(frame, get_roi("loot_elixir"), max_plausible=_MAX_PLAUSIBLE["loot"]),
+        "dark_elixir": read_number(
+            frame, get_roi("loot_dark_elixir"), max_plausible=_MAX_PLAUSIBLE["dark_elixir"]
+        ),
     }
 
 
