@@ -141,6 +141,9 @@ def run_planner(adb: ADB, template_set: dict[str, tmpl.Template], config: dict) 
     if pos is None:
         # Fallback: known location of the Copy button when Data Export is on screen.
         pos = (1130, 595)
+    # Empty the macOS clipboard first so we can tell whether the Copy actually
+    # landed (otherwise pbpaste returns whatever the user had copied earlier).
+    adb.clear_clipboard()
     adb.tap(pos[0], pos[1])
     adb.wait_random(1.0, 1.5)
 
@@ -148,6 +151,11 @@ def run_planner(adb: ADB, template_set: dict[str, tmpl.Template], config: dict) 
         raw_json = adb.read_clipboard()
     except RuntimeError as e:
         log.error(f"Clipboard read failed — skipping planner ({e})")
+        adb.back(); adb.wait_random(0.5, 1.0)
+        adb.back(); adb.wait_random(0.5, 1.0)
+        return
+    if not raw_json.lstrip().startswith("{"):
+        log.error("Clipboard does not contain JSON — Copy Data tap probably missed")
         adb.back(); adb.wait_random(0.5, 1.0)
         adb.back(); adb.wait_random(0.5, 1.0)
         return
@@ -180,15 +188,22 @@ def run_planner(adb: ADB, template_set: dict[str, tmpl.Template], config: dict) 
         log.error(f"Gemini planner failed: {e}")
         return
 
+    summary_lines: list[str] = []
     for decision in result.decisions:
-        if decision.action == "wait" or decision.action == "skip":
+        if decision.action in ("wait", "skip"):
             log.info(f"Planner says {decision.action}: {decision.reasoning}")
+            summary_lines.append(f"{decision.action}: {decision.reasoning}")
             continue
 
+        log.info(f"Planner: {decision.action} {decision.target} → lvl {decision.target_level}")
+        summary_lines.append(f"{decision.action}: {decision.target} → lvl {decision.target_level}")
         if decision.action == "upgrade_hero":
             execute_hero_upgrade(adb, decision, template_set)
         else:
             execute_upgrade(adb, decision, template_set)
+
+    if summary_lines:
+        telegram.send("<b>planner</b>\n" + "\n".join(summary_lines), silent=True)
 
 
 def attack_cycle(

@@ -152,6 +152,12 @@ end tell
             raise RuntimeError("Mac clipboard empty (BlueStacks→host sync may be off)")
         return text
 
+    def clear_clipboard(self) -> None:
+        # Stash an empty string into the macOS clipboard so we can detect
+        # whether a subsequent CoC "Copy" actually succeeded (vs. picking up
+        # whatever the user had previously copied).
+        subprocess.run(["pbcopy"], input="", text=True, timeout=2)
+
     # --- App lifecycle ---
 
     def launch_coc(self) -> None:
