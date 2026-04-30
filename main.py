@@ -371,27 +371,52 @@ def main() -> None:
     pause_event = threading.Event()
     pause_event.set()  # set = run; clear = pause
 
-    def _fmt_score(n: int) -> str:
+    def _fmt(n: int) -> str:
         if n >= 1_000_000:
             return f"{n / 1_000_000:.2f}M"
         if n >= 1_000:
             return f"{n / 1_000:.0f}K"
         return str(n)
 
+    def _eta_to_full(current: int, cap: int, per_hour: int) -> str:
+        if per_hour <= 0 or current >= cap:
+            return "—"
+        hours = (cap - current) / per_hour
+        if hours < 1:
+            return f"{int(hours * 60)}m"
+        return f"{hours:.1f}h"
+
     def _status_text() -> str:
-        secs = int(time.time() - session_anchor)
+        secs = max(int(time.time() - session_anchor), 1)
         score = loot_score(**session_loot)
-        rate = int(score * 3600 / max(secs, 1))
-        running = "running" if pause_event.is_set() else "<b>paused</b>"
+        rate = int(score * 3600 / secs)
+        gold_rate = int(session_loot["gold"] * 3600 / secs)
+        elixir_rate = int(session_loot["elixir"] * 3600 / secs)
+        dark_rate = int(session_loot["dark_elixir"] * 3600 / secs)
+
+        # Read current resources from the live screen (not session totals).
+        cur = read_resources(grab_frame_bgr(adb))
+        cur = {k: (v if isinstance(v, int) and v < 1_000_000_000 else 0) for k, v in cur.items()}
+
+        cap_g = config["resources"]["storage_max"]["gold"]
+        cap_e = config["resources"]["storage_max"]["elixir"]
+        cap_d = config["resources"]["storage_max"]["dark_elixir"]
+
+        running = "▶️ running" if pause_event.is_set() else "⏸ <b>paused</b>"
         return (
-            f"<b>clash-farmer</b> — {running}\n"
-            f"uptime: {secs // 3600}h{(secs % 3600) // 60}m\n"
-            f"cycles: {attack_count} ok / {failed_count} fail\n"
-            f"score: {_fmt_score(score)} ({_fmt_score(rate)}/hr)\n"
-            f"  gold {session_loot['gold']:,}\n"
-            f"  elixir {session_loot['elixir']:,}\n"
-            f"  dark {session_loot['dark_elixir']:,}\n"
-            f"state: {state_detector.current.name}"
+            f"🏰 <b>clash-farmer</b> · {running}\n"
+            f"⏱ {secs // 3600}h{(secs % 3600) // 60:02d}m  ·  "
+            f"🥊 {attack_count} ok / {failed_count} fail\n"
+            f"\n"
+            f"📊 <b>session score</b>: {_fmt(score)} ({_fmt(rate)}/hr)\n"
+            f"🪙 gold   gained {_fmt(session_loot['gold'])} ({_fmt(gold_rate)}/hr) · "
+            f"on hand {_fmt(cur.get('gold', 0))} (full in {_eta_to_full(cur.get('gold', 0), cap_g, gold_rate)})\n"
+            f"💧 elixir gained {_fmt(session_loot['elixir'])} ({_fmt(elixir_rate)}/hr) · "
+            f"on hand {_fmt(cur.get('elixir', 0))} (full in {_eta_to_full(cur.get('elixir', 0), cap_e, elixir_rate)})\n"
+            f"🟣 dark   gained {_fmt(session_loot['dark_elixir'])} ({_fmt(dark_rate)}/hr) · "
+            f"on hand {_fmt(cur.get('dark_elixir', 0))} (full in {_eta_to_full(cur.get('dark_elixir', 0), cap_d, dark_rate)})\n"
+            f"\n"
+            f"🎯 state: <code>{state_detector.current.name}</code>"
         )
 
     def _send_screenshot(_: str = "") -> str | None:
@@ -418,15 +443,15 @@ def main() -> None:
         "restarted CoC; bot will resume when home detected"
     )[3])
     poller.on("/help", lambda _: (
-        "<b>commands</b>\n"
-        "/status — uptime, cycles, score, current state\n"
+        "🤖 <b>commands</b>\n"
+        "/status — uptime · cycles · loot rates · ETAs\n"
         "/screenshot — current BlueStacks frame\n"
-        "/pause — stop the loop (won't kill CoC)\n"
+        "/pause — stop the loop (won't touch CoC)\n"
         "/resume — start the loop again\n"
-        "/restart — kill+launch CoC"
+        "/restart — kill + launch CoC"
     ))
     poller.start()
-    telegram.send(f"clash-farmer started — /help for commands", silent=True)
+    telegram.send("🚀 clash-farmer started — /help for commands", silent=True)
 
     while True:
         pause_event.wait()
@@ -563,17 +588,8 @@ def main() -> None:
                 f"  cycle score {cycle_score:,} | session {score_per_hr:,}/hr "
                 f"({session_score:,} over {session_secs/60:.0f} min)"
             )
-            # Hourly digest, only if Telegram is configured.
             if time.time() - digest_anchor >= 3600:
-                hour_score = loot_score(**digest_loot)
-                telegram.send(
-                    f"<b>last hour</b>: {attack_count} attacks, "
-                    f"score {hour_score:,} ({hour_score:,}/hr)\n"
-                    f"gold {digest_loot['gold']:,}, "
-                    f"elixir {digest_loot['elixir']:,}, "
-                    f"dark {digest_loot['dark_elixir']:,}\n"
-                    f"<i>session: {score_per_hr:,}/hr over {session_secs/60:.0f} min</i>"
-                )
+                telegram.send(_status_text(), silent=True)
                 digest_anchor = time.time()
                 digest_loot = {"gold": 0, "elixir": 0, "dark_elixir": 0}
         else:
