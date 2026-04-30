@@ -387,7 +387,7 @@ def main() -> None:
                 state_detector.reset()
                 consecutive_unknown = 0
                 continue
-            if consecutive_unknown >= 4 and consecutive_unknown % 4 == 0:
+            if consecutive_unknown >= 8 and consecutive_unknown % 4 == 0:
                 log.warning(f"UNKNOWN x{consecutive_unknown} — force-restarting CoC")
                 adb.kill_coc()
                 time.sleep(2)
@@ -397,28 +397,31 @@ def main() -> None:
                 continue
             # Recovery ladder for unknown screens:
             # 1st: any "Return Home" button on screen (defense replay,
-            #      visit-village, post-attack result that fell outside the
-            #      RESULT ROI). Catch this before reward-tap to avoid
-            #      accidentally tapping an offer card.
-            # 2nd: tap chest/item center to advance reward animations.
-            # 3rd: red close-X for any modal.
-            # 4th: BACK as last resort before CoC restart.
+            #      visit-village, post-attack result outside the RESULT ROI).
+            # 2nd-3rd: tap chest/item center + Continue button — most
+            #      "stuck" situations are chained reward animations.
+            # 4th-5th: red close-X / BACK for modals.
+            # 8+: CoC restart (handled below).
             ret = template_set.get("btn_return_home")
             ret_pos = tmpl.find(frame, ret, threshold=0.6) if ret is not None else None
             if consecutive_unknown == 1 and ret_pos is not None:
                 log.info(f"UNKNOWN x1 — tap Return Home at {ret_pos}")
                 adb.tap(ret_pos[0], ret_pos[1])
-            elif consecutive_unknown == 1:
-                log.info("UNKNOWN x1 — tap (640, 400) to advance reward")
-                adb.tap(640, 400)
-            elif consecutive_unknown == 2:
-                close_pos = find_red_close_x(frame)
-                if close_pos is not None:
-                    log.info(f"UNKNOWN x2 — tap red close-X at {close_pos}")
-                    adb.tap(close_pos[0], close_pos[1])
+            elif consecutive_unknown in (1, 2, 3):
+                # Chest sequences chain 3-5 screens; tap chest then Continue
+                # in alternating attempts.
+                if consecutive_unknown % 2 == 1:
+                    adb.tap(640, 400)
                 else:
                     adb.tap(640, 595)
-            elif consecutive_unknown == 3:
+            elif consecutive_unknown in (4, 5):
+                close_pos = find_red_close_x(frame)
+                if close_pos is not None:
+                    log.info(f"UNKNOWN x{consecutive_unknown} — red close-X")
+                    adb.tap(close_pos[0], close_pos[1])
+                else:
+                    adb.back()
+            elif consecutive_unknown in (6, 7):
                 adb.back()
             adb.wait_random(1.0, 2.0)
             continue
