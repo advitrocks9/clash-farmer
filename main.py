@@ -470,9 +470,10 @@ def main() -> None:
         return f"{hours:.1f}h"
 
     def _short_status(resources: dict, deltas: dict | None = None) -> str:
-        """One-line status: '🪙 18.2M (+1.2M)  💧 14.5M (+800K)  🟣 390K (+5K)'."""
+        """One-line status: '🟡 18.2M (+1.2M)  🟣 14.5M (+800K)  ⚫ 390K (+5K)'.
+        gold=yellow circle, elixir=purple circle, dark elixir=black circle."""
         parts = []
-        for icon, key in (("🪙", "gold"), ("💧", "elixir"), ("🟣", "dark_elixir")):
+        for icon, key in (("🟡", "gold"), ("🟣", "elixir"), ("⚫", "dark_elixir")):
             val = resources.get(key)
             piece = f"{icon} {_fmt(val) if isinstance(val, int) else '—'}"
             if deltas:
@@ -506,11 +507,11 @@ def main() -> None:
             f"🥊 {attack_count} ok / {failed_count} fail\n"
             f"\n"
             f"📊 <b>session score</b>: {_fmt(score)} ({_fmt(rate)}/hr)\n"
-            f"🪙 gold   gained {_fmt(session_loot['gold'])} ({_fmt(gold_rate)}/hr) · "
+            f"🟡 gold   gained {_fmt(session_loot['gold'])} ({_fmt(gold_rate)}/hr) · "
             f"on hand {_fmt(cur.get('gold', 0))} (full in {_eta_to_full(cur.get('gold', 0), cap_g, gold_rate)})\n"
-            f"💧 elixir gained {_fmt(session_loot['elixir'])} ({_fmt(elixir_rate)}/hr) · "
+            f"🟣 elixir gained {_fmt(session_loot['elixir'])} ({_fmt(elixir_rate)}/hr) · "
             f"on hand {_fmt(cur.get('elixir', 0))} (full in {_eta_to_full(cur.get('elixir', 0), cap_e, elixir_rate)})\n"
-            f"🟣 dark   gained {_fmt(session_loot['dark_elixir'])} ({_fmt(dark_rate)}/hr) · "
+            f"⚫ dark   gained {_fmt(session_loot['dark_elixir'])} ({_fmt(dark_rate)}/hr) · "
             f"on hand {_fmt(cur.get('dark_elixir', 0))} (full in {_eta_to_full(cur.get('dark_elixir', 0), cap_d, dark_rate)})\n"
             f"\n"
             f"🎯 state: <code>{state_detector.current.name}</code>"
