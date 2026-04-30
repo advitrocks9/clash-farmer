@@ -664,10 +664,12 @@ def main() -> None:
                 if free_builders is not None and free_builders >= 2:
                     if suggest.upgrade_top_suggestion(adb, template_set, kind="builder"):
                         actions.append("builder")
-                # 2. ONE lab suggestion (lab queue independent of builders).
-                if kind in ("elixir", "dark_elixir"):
-                    if suggest.upgrade_top_suggestion(adb, template_set, kind="lab"):
-                        actions.append("lab")
+                # 2. Lab suggestion DISABLED — the Lab UI has a different
+                #    layout (tabs, research tiles, no bottom Upgrade button).
+                #    Tapping a row opens the Lab building modal which our
+                #    bottom-card-OCR gate refuses, but the bot then needs a
+                #    multi-step recovery to get back to HOME. Re-enable when
+                #    upgrade.lab_research is implemented.
                 # 3. ONE pet-house attempt for elixir.
                 if kind == "elixir":
                     if suggest.upgrade_pet_house(adb, template_set):

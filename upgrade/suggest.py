@@ -43,29 +43,55 @@ CONFIRM_BTN = (897, 629)
 
 
 def _suggestion_row_ys(frame: np.ndarray) -> list[int]:
-    """Y positions of suggested-upgrade rows in the open tooltip.
+    """Y positions of rows in the 'Suggested upgrades' section ONLY.
 
-    Each row has a coloured cost icon (gold / elixir / dark / gem) in a
-    narrow vertical band. We mask the band for any saturated colour and
-    cluster connected blobs into row centres. The 'Suggested upgrades:'
-    section starts ~y=200 and 'Other upgrades:' is the divider — we keep
-    everything in the upper half (y < 380) which empirically maps to the
-    suggested section.
+    The tooltip has three sections, top to bottom:
+      Upgrades in progress:  ← clock-icon rows (skip)
+      Suggested upgrades:    ← gold/elixir/dark cost rows (target)
+      Other upgrades:        ← more cost rows (skip — these are too
+                              expensive or low-priority per game)
+
+    We OCR the tooltip text column to locate the 'Suggested upgrades:'
+    header line, then return only the rows below it (and above the
+    'Other upgrades:' header).
     """
-    # Cost-icon column is around x=680-710 inside the tooltip.
-    band = frame[180:380, 670:720]
+    from screen.ocr import _get_reader
+    # Run OCR on a wider crop to capture row text + headers
+    crop = frame[100:430, 320:920]
+    upscaled = cv2.resize(crop, (crop.shape[1] * 2, crop.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
+    reader = _get_reader()
+    results = reader.readtext(upscaled, detail=1, paragraph=False)
+    # Find Y bounds of 'Suggested' section in the upscaled-then-mapped frame.
+    suggest_y = None
+    other_y = None
+    for bbox, text, _ in results:
+        text_l = text.lower()
+        # 'sugg' covers OCR variants like 'sugges' / '@uggested'
+        if "sugg" in text_l and suggest_y is None:
+            ys = [pt[1] for pt in bbox]
+            suggest_y = (min(ys) // 2) + 100  # back to frame coords
+        if "other" in text_l and other_y is None:
+            ys = [pt[1] for pt in bbox]
+            other_y = (min(ys) // 2) + 100
+    if suggest_y is None:
+        suggest_y = 200  # fallback
+    if other_y is None:
+        other_y = 380
+
+    # Now find cost-icon rows in [suggest_y .. other_y]
+    band = frame[suggest_y:other_y, 670:720]
+    if band.size == 0:
+        return []
     hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
-    # Any saturated pixel: gold-yellow, elixir-pink, dark-purple, gem-pink
     sat = cv2.inRange(hsv, np.array([0, 90, 80]), np.array([180, 255, 255]))
-    # Vertical projection — sum saturated pixels per row
     proj = sat.sum(axis=1)
-    # Find local maxima above a threshold
     rows: list[int] = []
     last_y = -100
     for y, v in enumerate(proj):
         if v > 100 and y - last_y > 18:
-            rows.append(y + 180)
+            rows.append(y + suggest_y)
             last_y = y
+    log.info(f"suggestion rows: suggest_y={suggest_y} other_y={other_y} rows={rows}")
     return rows
 
 
