@@ -84,12 +84,22 @@ def deploy_heroes(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
 def monitor_battle(
     adb: ADB,
     template_set: dict[str, tmpl.Template],
-    max_battle_seconds: float = 180.0,
+    max_battle_seconds: float = 120.0,
 ) -> None:
+    """Wait until battle ends or loot plateaus, whichever comes first.
+
+    Three exit signals, polled every second:
+    - btn_return_home anywhere on screen → battle ended naturally
+    - btn_surrender absent → battle ended (we missed return_home detection)
+    - loot_gained OCR plateaus for 3 reads → surrender to save time
+    """
+    btn_return = template_set.get("btn_return_home")
+    btn_surrender = template_set.get("btn_surrender")
+
     last_loot: int | None = None
     plateau_count = 0
     max_plateau = 3
-    check_interval = 2.0
+    check_interval = 1.0
     started_at = time.time()
 
     while True:
@@ -100,23 +110,24 @@ def monitor_battle(
 
         frame = grab_frame_bgr(adb)
 
-        btn_return = template_set.get("btn_return_home")
-        if btn_return and tmpl.exists(frame, btn_return, roi=(500, 550, 780, 700)):
-            log.info("Battle ended naturally")
+        if btn_return is not None and tmpl.exists(frame, btn_return, threshold=0.6):
+            log.info("Battle ended (return-home button visible)")
+            return
+        if btn_surrender is not None and not tmpl.exists(
+            frame, btn_surrender, threshold=0.7, roi=(0, 500, 200, 580)
+        ) and time.time() - started_at > 6:
+            log.info("Battle ended (surrender button gone)")
             return
 
         current_loot = read_number(frame, get_roi("loot_gained"))
-
         if current_loot is not None and last_loot is not None:
             if current_loot <= last_loot:
                 plateau_count += 1
                 log.info(f"Loot plateaued ({plateau_count}/{max_plateau}): {current_loot:,}")
             else:
                 plateau_count = 0
-
         if current_loot is not None:
             last_loot = current_loot
-
         if plateau_count >= max_plateau:
             log.info("Loot gain plateaued — surrendering")
             _surrender(adb, template_set)
