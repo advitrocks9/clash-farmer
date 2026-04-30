@@ -45,9 +45,10 @@ from planner.gemini import plan
 from screen import templates as tmpl
 from screen.capture import grab_frame_bgr
 from screen.ocr import read_resources
+import metrics
 from recovery import recover_to_home
 from screen.state import GameState, StateDetector, find_red_close_x
-from upgrade import walls
+from upgrade import suggest, walls
 from upgrade.execute import execute_hero_upgrade, execute_upgrade
 
 log = logging.getLogger("clash-farmer")
@@ -635,15 +636,25 @@ def main() -> None:
         # in TH15+ and absorb 3M-5M gold or elixir per tap, so storages
         # don't waste loot we can't store.
         for kind in maxed_resources(resources, config):
-            log.info(f"resource {kind} maxed — upgrading a wall before attacking")
+            log.info(f"resource {kind} maxed — running spend flow")
             try:
-                ok = walls.try_wall_upgrade(adb, template_set, kind=kind)
+                # Prefer the in-game Builder suggestion list (real upgrades
+                # for free builders). Then try Pet House (its own slot, no
+                # suggestion list). Fall back to a single wall upgrade.
+                ok = suggest.upgrade_top_suggestion(adb, template_set, kind="builder")
+                if not ok:
+                    ok = suggest.upgrade_pet_house(adb, template_set)
+                if not ok:
+                    ok = walls.try_wall_upgrade(adb, template_set, kind=kind)
                 if ok:
-                    telegram.send(f"🧱 wall upgraded with {kind} (storage was full)", silent=True)
+                    telegram.send(f"🛠 spent excess {kind} on an upgrade", silent=True)
+                    metrics.log_event("spend", resource=kind, success=True)
                 else:
-                    telegram.send(f"⚠️ {kind} maxed but wall upgrade failed", silent=True)
+                    telegram.send(f"⚠️ {kind} maxed but no upgrade available", silent=True)
+                    metrics.log_event("spend", resource=kind, success=False)
             except Exception as e:
-                log.error(f"wall upgrade failed: {e}")
+                log.error(f"spend flow failed: {e}")
+                metrics.log_event("spend_error", resource=kind, error=str(e))
 
         cycle_started_at = time.time()
         result, info = attack_cycle(adb, template_set, config, state_detector)

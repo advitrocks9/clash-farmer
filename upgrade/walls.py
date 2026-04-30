@@ -31,7 +31,10 @@ from screen.state import GameState, find_red_close_x
 log = logging.getLogger(__name__)
 
 
-WALL_TAP_POS = (380, 250)
+# User rearranged the base on 2026-04-30 with a dedicated wall grid in the
+# bottom-centre quadrant (roughly x=440-880, y=430-610). Tapping the centre
+# reliably lands on a wall.
+WALL_TAP_POS = (660, 520)
 UPGRADE_BTN_GOLD = (760, 622)
 UPGRADE_BTN_ELIXIR = (875, 622)
 UPGRADE_BTN_GEM = (1095, 622)
@@ -53,9 +56,9 @@ def try_wall_upgrade(
         # Tap a wall to open the info card. Some walls may be maxed at the
         # current TH level — the card shows only Info+SelectRow with no
         # Upgrade buttons in that case, so retry on a slightly different
-        # position to land on a different wall.
-        wx = WALL_TAP_POS[0] + (attempt * 90)
-        wy = WALL_TAP_POS[1] + (attempt * 30)
+        # position to land on a different wall in the dedicated grid.
+        wx = WALL_TAP_POS[0] + (attempt * 60)
+        wy = WALL_TAP_POS[1] - (attempt * 30)
         adb.tap_precise(wx, wy)
         adb.wait_random(1.0, 1.6)
 
