@@ -69,14 +69,52 @@ def _suggestion_row_ys(frame: np.ndarray) -> list[int]:
     return rows
 
 
+def _read_card_text(frame: np.ndarray) -> str:
+    """OCR the bottom info card to verify it offers a real Upgrade.
+
+    Cards have completely different button sets depending on building state:
+        - Idle    → Info / Select Row / Upgrade More / Upgrade (gold/elixir/gem)
+        - Upgrading → Info / Boost Builders / Cancel / Finish Now (GEMS)
+                                                      / Assign Apprentice
+        - Pet House (Pet upgrading) → Info / Boost / Cancel / Finish Now / Pets
+
+    We refuse to proceed unless the card text contains 'Upgrade' AND does
+    NOT contain any gem-pay action ('Boost', 'Finish', 'Cancel', 'Apprentice').
+    """
+    from screen.ocr import _get_reader
+    crop = frame[580:670, 400:1200]
+    upscaled = cv2.resize(crop, (crop.shape[1] * 2, crop.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
+    reader = _get_reader()
+    results = reader.readtext(upscaled, detail=0, paragraph=False)
+    return " ".join(results).lower() if results else ""
+
+
+# Words on a building card that mean tapping a button SPENDS GEMS.
+# If any of these appear, abort the upgrade flow entirely.
+GEM_BUTTON_WORDS = ("boost", "finish", "cancel", "apprentice", "pets")
+
+
+def _safe_to_upgrade(frame: np.ndarray) -> tuple[bool, str]:
+    """Return (safe, reason). Only tap Upgrade if card text is unambiguous."""
+    text = _read_card_text(frame)
+    if not text:
+        return False, "no_text"
+    for word in GEM_BUTTON_WORDS:
+        if word in text:
+            return False, f"refused (gem button '{word}' on card): {text!r}"
+    if "upgrade" not in text:
+        return False, f"no Upgrade text on card: {text!r}"
+    return True, text
+
+
 def _find_upgrade_button(frame: np.ndarray) -> tuple[int, int] | None:
     """Find the green Upgrade button on the bottom info card.
 
-    Returns the rightmost large green pill in the card strip y=590-660.
-    Wall cards have 3 Upgrade buttons (gold/elixir/gem) — the rightmost
-    is the gem one which usually isn't what we want, so we prefer the
-    leftmost LARGE green button (gold) when multiple are present.
-    For non-wall cards there's only one large Upgrade button.
+    SAFETY: this is only called after _safe_to_upgrade(frame) returns True,
+    which guarantees the card has 'Upgrade' text and NO gem buttons.
+
+    Returns the leftmost large green pill in the card strip y=590-660.
+    On wall cards (3 Upgrade buttons gold/elixir/gem) we want gold = leftmost.
     """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, np.array([35, 100, 80]), np.array([85, 255, 255]))
@@ -93,7 +131,7 @@ def _find_upgrade_button(frame: np.ndarray) -> tuple[int, int] | None:
             btns.append((x, y, w, h, a))
     if not btns:
         return None
-    btns.sort(key=lambda b: b[0])  # left-to-right
+    btns.sort(key=lambda b: b[0])
     x, y, w, h, _ = btns[0]
     return x + w // 2, y + h // 2
 
@@ -104,6 +142,41 @@ def _confirm_button_visible(frame: np.ndarray) -> bool:
     mask = cv2.inRange(hsv, np.array([35, 150, 80]), np.array([75, 255, 255]))
     region = mask[600:680, 800:1000]
     return int(region.sum()) > 5000
+
+
+def _confirm_pays_resources_only(frame: np.ndarray) -> tuple[bool, str]:
+    """SAFETY GATE for the upgrade Confirm dialog.
+
+    The dialog has a green Confirm pill at the bottom-right showing the
+    cost as 'NUMBER + ICON'. If the icon is a gem (pink/cyan diamond)
+    rather than gold/elixir/dark, abort.
+
+    We detect by colour band of pixels next to the cost text in the
+    dialog. Gold dominates yellow ~25°. Elixir dominates pink ~310°.
+    Dark dominates near-black saturated purple. Gems dominate cyan
+    ~180° (with a strong saturation that beats elixir's pink).
+
+    Returns (safe, reason).
+    """
+    # Cost icon sits at the right edge of the green Confirm pill,
+    # roughly (940-990, 615-650) in the upgrade dialog.
+    region = frame[615:660, 920:1000]
+    hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+
+    # Resource hue masks
+    gold_px   = int(cv2.inRange(hsv, np.array([20, 150, 150]), np.array([35, 255, 255])).sum() / 255)
+    elixir_px = int(cv2.inRange(hsv, np.array([140, 100, 100]), np.array([175, 255, 255])).sum() / 255)
+    dark_px   = int(cv2.inRange(hsv, np.array([110, 30, 20]), np.array([140, 200, 110])).sum() / 255)
+    gem_px    = int(cv2.inRange(hsv, np.array([85, 100, 100]), np.array([110, 255, 255])).sum() / 255)
+
+    counts = {"gold": gold_px, "elixir": elixir_px, "dark": dark_px, "gem": gem_px}
+    log.info(f"confirm-cost icon counts: {counts}")
+    if gem_px > max(gold_px, elixir_px, dark_px) and gem_px > 30:
+        return False, f"gem cost detected (gem={gem_px}, others={counts})"
+    if max(gold_px, elixir_px, dark_px) < 30:
+        return False, f"no resource icon detected ({counts})"
+    return True, f"resource cost ({counts})"
 
 
 def _dismiss(adb: ADB) -> None:
@@ -138,6 +211,15 @@ def upgrade_top_suggestion(
     adb.wait_random(2.0, 3.0)
 
     frame = grab_frame_bgr(adb)
+
+    # SAFETY GATE 1: building card text. Refuse to tap if it shows any
+    # gem-pay action (Boost / Finish / Cancel / Apprentice / Pets).
+    safe, reason = _safe_to_upgrade(frame)
+    if not safe:
+        log.warning(f"suggest[{kind}]: card not safe — {reason}")
+        _dismiss(adb)
+        return False
+
     upgrade_pos = _find_upgrade_button(frame)
     if upgrade_pos is None:
         log.warning(f"suggest[{kind}]: no Upgrade button on building card")
@@ -151,17 +233,25 @@ def upgrade_top_suggestion(
     frame = grab_frame_bgr(adb)
     if not _confirm_button_visible(frame):
         log.warning(f"suggest[{kind}]: no Confirm dialog (insufficient resources?)")
-        # Close the upgrade dialog if it appeared without Confirm, then dismiss
         x = find_red_close_x(frame, region=(1080, 0, 1280, 200))
         if x:
             adb.tap_precise(x[0], x[1])
         _dismiss(adb)
         return False
 
+    # SAFETY GATE 2: confirm cost icon. Refuse to confirm if cost is gems.
+    safe_cost, cost_reason = _confirm_pays_resources_only(frame)
+    if not safe_cost:
+        log.error(f"suggest[{kind}]: REFUSING confirm — {cost_reason}")
+        x = find_red_close_x(frame, region=(1080, 0, 1280, 200))
+        if x:
+            adb.tap_precise(x[0], x[1])
+        _dismiss(adb)
+        return False
+
+    log.info(f"suggest[{kind}]: confirm cost is resources ({cost_reason}) — proceeding")
     adb.tap_precise(*CONFIRM_BTN)
     adb.wait_random(1.5, 2.5)
-    # Tap a safe area once after confirm to dismiss any post-confirm card
-    # so the next caller sees a clean HOME, not a building info panel.
     _dismiss(adb)
     log.info(f"suggest[{kind}]: upgrade started")
     return True
@@ -179,6 +269,12 @@ def upgrade_pet_house(adb: ADB, template_set: dict[str, "tmpl.Template"]) -> boo
     adb.wait_random(2.0, 3.0)
 
     frame = grab_frame_bgr(adb)
+    safe, reason = _safe_to_upgrade(frame)
+    if not safe:
+        log.warning(f"pet_house: card not safe — {reason}")
+        _dismiss(adb)
+        return False
+
     upgrade_pos = _find_upgrade_button(frame)
     if upgrade_pos is None:
         log.info("pet_house: no upgrade available right now")
@@ -191,6 +287,15 @@ def upgrade_pet_house(adb: ADB, template_set: dict[str, "tmpl.Template"]) -> boo
     frame = grab_frame_bgr(adb)
     if not _confirm_button_visible(frame):
         log.warning("pet_house: confirm dialog not shown")
+        _dismiss(adb)
+        return False
+
+    safe_cost, cost_reason = _confirm_pays_resources_only(frame)
+    if not safe_cost:
+        log.error(f"pet_house: REFUSING confirm — {cost_reason}")
+        x = find_red_close_x(frame, region=(1080, 0, 1280, 200))
+        if x:
+            adb.tap_precise(x[0], x[1])
         _dismiss(adb)
         return False
 
