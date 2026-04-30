@@ -38,10 +38,9 @@ def select_troop(adb: ADB, template_set: dict[str, tmpl.Template], troop_name: s
 
 
 def deploy_sneaky_goblins(adb: ADB, template_set: dict[str, tmpl.Template]) -> None:
-    # Zoom out via BlueStacks' default UP-arrow keymap (host-side osascript).
-    # Without this, deploy positions land on the red zone inside the base.
-    adb.bluestacks_zoom_out(taps=10)
-    adb.wait_random(0.4, 0.7)
+    # Zoom out so DEPLOY_EDGES land on the green strip outside the base.
+    adb.bluestacks_zoom_out(taps=6)
+    adb.wait_random(0.3, 0.6)
 
     if not select_troop(adb, template_set, "sneaky_goblin"):
         log.warning("Could not find sneaky goblin in army bar — tapping first slot")
@@ -54,7 +53,7 @@ def deploy_sneaky_goblins(adb: ADB, template_set: dict[str, tmpl.Template]) -> N
     all_points: list[tuple[int, int]] = []
     for edge_name in ("top", "bottom", "left", "right"):
         all_points.extend(DEPLOY_EDGES[edge_name])
-    adb.tap_burst(all_points, gap_ms=30)
+    adb.tap_burst(all_points, gap_ms=20)
 
     log.info(f"Issued {len(all_points)} sneaky goblin deploy taps across all edges")
 
@@ -90,7 +89,7 @@ def monitor_battle(
     last_loot: int | None = None
     plateau_count = 0
     max_plateau = 3
-    check_interval = 3.0
+    check_interval = 2.0
     started_at = time.time()
 
     while True:

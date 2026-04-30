@@ -394,9 +394,9 @@ def main() -> None:
         # all collectors at default scroll. CoC keeps the zoom level until
         # something else (battle, modal) resets it.
         if not home_zoomed_out:
-            log.info("Zooming out home village (UP-arrow via BlueStacks keymap)")
-            adb.bluestacks_zoom_out(taps=10)
-            adb.wait_random(0.4, 0.7)
+            log.info("Zooming out home village")
+            adb.bluestacks_zoom_out(taps=6)
+            adb.wait_random(0.3, 0.6)
             home_zoomed_out = True
 
         if should_take_break(session_start, config):
